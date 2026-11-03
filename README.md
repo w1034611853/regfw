@@ -118,6 +118,8 @@ WRITE POE_GRP_VCPU_MASK[1][0]: 0x00000000 -> 0x00000030 | addr: 0x01225020 -> 0x
 
 需要 CMake ≥ 3.20、C++20 编译器。Linux x86_64 发布包自带 hlog 3.2.1 的头文件和 runtime，可直接构建。使用源码目录时，另外传入 `-DHLog_ROOT=/absolute/path/to/hlog`；该目录应包含 `include/hlog.h` 和 `lib/libhlog.so`。
 
+GitHub 克隆版将预编译的 hlog 共享库以 `.xz` 保存。首次构建前执行 `bash scripts/restore_hlog.sh` 恢复原始 `.so` 文件；此操作不修改框架源码。
+
 在本 README 所在目录执行：
 
 ```sh

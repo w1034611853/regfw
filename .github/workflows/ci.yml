@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Restore bundled hlog shared library
+        run: bash scripts/restore_hlog.sh
       - name: Build the SDK and all tests
         run: |
           cmake -S . -B build -G Ninja \
