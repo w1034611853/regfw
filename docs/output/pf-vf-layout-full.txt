@@ -1,0 +1,68 @@
+COMPOSED ENTITY / VIEW LAYOUT (static; resolvers are not executed)
+Rows describe address views; entity: names referenced storage, not a new allocation. Ranges are mapping bounds, not occupied register spans.
+Folded repeats show the entity target/reset of the representative i=j=k=0 instance; a shared entity keeps the same target name across entrances.
+
+BUNDLE / ADDRESS LAYOUT
+┌───────────────────────────────────────────────────┬───────────────────────────────────────┬───────────────────────────────────────────────────────────────────┐
+│ Address view                                      │ Address range / formula               │ Purpose / storage target                                          │
+├───────────────────────────────────────────────────┼───────────────────────────────────────┼───────────────────────────────────────────────────────────────────┤
+│ POE                                               │ 0x00000000..0x01ffffff                │                                                                   │
+│ POE                                               │ 0x00000000..0x01ffffff                │ VIEW; priority=0                                                  │
+│ POE.DEVICE                                        │ 0x00000000..0x01ffffff                │ VIEW; priority=0                                                  │
+│ POE.DEVICE.PF                                     │ 0x00000000..0x00ffffff                │ VIEW; priority=0                                                  │
+│ POE.DEVICE.PF.MODULE                              │ 0x00000000..0x0001ffff                │ VIEW; priority=0                                                  │
+│ POE.DEVICE.PF.MODULE.module                       │ 0x00000000..0x0001ffff                │ VIEW → entity: POE.module; priority=0; reset=PF                   │
+│ POE.DEVICE.PF.PF_BUSINESS                         │ 0x00020000..0x000fffff                │ VIEW; priority=0                                                  │
+│ POE.DEVICE.PF.PF_BUSINESS.pf                      │ 0x00020000..0x000fffff                │ VIEW → entity: POE.pf; priority=0; reset=PF                       │
+│ POE.DEVICE.PF.PF_COMMAND                          │ 0x00100000..0x001fffff                │ VIEW; priority=0                                                  │
+│ POE.DEVICE.PF.PF_COMMAND.pf_commands              │ 0x00100000..0x001fffff                │ VIEW → entity: POE.pf_commands; priority=0; reset=PF              │
+│ POE.DEVICE.PF.RESERVED                            │ 0x00a00000..0x00ffffff                │ RESERVED; priority=0                                              │
+│ POE.DEVICE.PF_TO_VF                               │ 0x00200000..0x009fffff                │ VIEW; priority=0                                                  │
+│ POE.DEVICE.PF_TO_VF.SLOT[i]                       │ 0x00200000..0x002fffff + i*0x00100000 │ VIEW; priority=0; i=0..7                                          │
+│ POE.DEVICE.PF_TO_VF.SLOT[i].RESERVED              │ 0x00200000..0x0021ffff + i*0x00100000 │ RESERVED; priority=0; i=0..7                                      │
+│ POE.DEVICE.PF_TO_VF.SLOT[i].BUSINESS              │ 0x00220000..0x002fffff + i*0x00100000 │ VIEW; priority=0; i=0..7                                          │
+│ POE.DEVICE.PF_TO_VF.SLOT[i].BUSINESS.vf           │ 0x00220000..0x002fffff + i*0x00100000 │ VIEW → entity: POE.vf[0]; priority=0; reset=VF; i=0..7            │
+│ POE.DEVICE.PF_TO_VF.SLOT[i].BUSINESS.REGISTER     │ 0x00220040..0x00220043 + i*0x00100000 │ VIEW → entity: POE.pf.CPU_SHARED; priority=10; reset=PF; i=0..7   │
+│ POE.DEVICE.PF_TO_VF.SLOT[i].BUSINESS.REGISTER     │ 0x00220080..0x00220083 + i*0x00100000 │ VIEW → entity: POE.pf.GROUP_SHARED; priority=10; reset=PF; i=0..7 │
+│ POE.DEVICE.VF                                     │ 0x01000000..0x01ffffff                │ VIEW; priority=0                                                  │
+│ POE.DEVICE.VF.VF_WINDOW[i]                        │ 0x01000000..0x011fffff + i*0x00200000 │ VIEW; priority=0; i=0..7                                          │
+│ POE.DEVICE.VF.VF_WINDOW[i].MODULE                 │ 0x01000000..0x0101ffff + i*0x00200000 │ VIEW; priority=0; i=0..7                                          │
+│ POE.DEVICE.VF.VF_WINDOW[i].MODULE.module          │ 0x01000000..0x0101ffff + i*0x00200000 │ VIEW → entity: POE.module; priority=0; reset=PF; i=0..7           │
+│ POE.DEVICE.VF.VF_WINDOW[i].BUSINESS               │ 0x01020000..0x010fffff + i*0x00200000 │ VIEW; priority=0; i=0..7                                          │
+│ POE.DEVICE.VF.VF_WINDOW[i].BUSINESS.vf            │ 0x01020000..0x010fffff + i*0x00200000 │ VIEW → entity: POE.vf[0]; priority=0; reset=VF; i=0..7            │
+│ POE.DEVICE.VF.VF_WINDOW[i].BUSINESS.REGISTER      │ 0x01020040..0x01020043 + i*0x00200000 │ VIEW → entity: POE.pf.CPU_SHARED; priority=10; reset=PF; i=0..7   │
+│ POE.DEVICE.VF.VF_WINDOW[i].BUSINESS.REGISTER      │ 0x01020080..0x01020083 + i*0x00200000 │ VIEW → entity: POE.pf.GROUP_SHARED; priority=10; reset=PF; i=0..7 │
+│ POE.DEVICE.VF.VF_WINDOW[i].VF_COMMAND             │ 0x01100000..0x011fffff + i*0x00200000 │ VIEW; priority=0; i=0..7                                          │
+│ POE.DEVICE.VF.VF_WINDOW[i].VF_COMMAND.vf_commands │ 0x01100000..0x011fffff + i*0x00200000 │ VIEW → entity: POE.vf_commands[0]; priority=0; reset=VF; i=0..7   │
+└───────────────────────────────────────────────────┴───────────────────────────────────────┴───────────────────────────────────────────────────────────────────┘
+
+VISIBLE REGISTER MAP (compact arrays)
+┌───────────────────────────────────────────────────┬─────────────────────────────┬───────────────────────────────────────────────────────────┬────────────────────────────────────────┬──────────────────────────────────────────────────────┬──────────┬─────────────┐
+│ Selected view                                     │ Register entity             │ Element address formula                                   │ Shape                                  │ Visible selection                                    │ Priority │ Access      │
+├───────────────────────────────────────────────────┼─────────────────────────────┼───────────────────────────────────────────────────────────┼────────────────────────────────────────┼──────────────────────────────────────────────────────┼──────────┼─────────────┤
+│ POE.DEVICE.PF.MODULE.module                       │ POE.module.DEVICE_ID        │ 0x00000000 + x0*0x00000000                                │ 32-bit                                 │ elements=1/1; linear={0}; visible words=1            │ 0        │ R, W        │
+│ POE.DEVICE.PF.MODULE.module                       │ POE.module.STATUS           │ 0x00000008 + x0*0x00000000                                │ 32-bit                                 │ elements=1/1; linear={0}; visible words=1            │ 0        │ R, W        │
+│ POE.DEVICE.PF.MODULE.module                       │ POE.module.TIMESTAMP        │ 0x00000020 + x0*0x00000000                                │ 64-bit                                 │ elements=1/1; linear={0}; visible words=2            │ 0        │ R, W        │
+│ POE.DEVICE.PF.MODULE.module                       │ POE.module.STATS            │ 0x00000080 + x0*0x00000004                                │ 32-bit; dims=[4]; strides=[0x4]        │ elements=4/4; linear={0..3}; visible words=4         │ 0        │ R, W        │
+│ POE.DEVICE.PF.PF_BUSINESS.pf                      │ POE.pf.CONTROL              │ 0x00020000 + x0*0x00000000                                │ 32-bit                                 │ elements=1/1; linear={0}; visible words=1            │ 0        │ R, W        │
+│ POE.DEVICE.PF.PF_BUSINESS.pf                      │ POE.pf.CPU_SHARED           │ 0x00020040 + x0*0x00000000                                │ 32-bit                                 │ elements=1/1; linear={0}; visible words=1            │ 0        │ R, W        │
+│ POE.DEVICE.PF.PF_BUSINESS.pf                      │ POE.pf.GROUP_SHARED         │ 0x00020080 + x0*0x00000000                                │ 32-bit                                 │ elements=1/1; linear={0}; visible words=1            │ 0        │ R, W        │
+│ POE.DEVICE.PF.PF_BUSINESS.pf                      │ POE.pf.DESC_BASE            │ 0x000200c0 + x0*0x00000000                                │ 64-bit                                 │ elements=1/1; linear={0}; visible words=2            │ 0        │ R, W        │
+│ POE.DEVICE.PF.PF_COMMAND.pf_commands              │ POE.pf_commands.DOORBELL    │ 0x00100010 + x0*0x00000000                                │ 32-bit                                 │ elements=1/1; linear={0}; visible words=1            │ 0        │ R, W        │
+│ POE.DEVICE.PF_TO_VF.SLOT[i].BUSINESS.vf           │ POE.vf[0].CONTROL           │ 0x00220000 + x0*0x00000000 + i*0x00100000                 │ 32-bit                                 │ elements=1/1; linear={0}; visible words=1; i=0..7    │ 0        │ R, W        │
+│ POE.DEVICE.PF_TO_VF.SLOT[i].BUSINESS.vf           │ POE.vf[0].STATUS            │ 0x00220008 + x0*0x00000000 + i*0x00100000                 │ 32-bit                                 │ elements=1/1; linear={0}; visible words=1; i=0..7    │ 0        │ R, W        │
+│ POE.DEVICE.PF_TO_VF.SLOT[i].BUSINESS.REGISTER     │ POE.pf.CPU_SHARED           │ 0x00220040 + x0*0x00000000 + i*0x00100000                 │ 32-bit                                 │ elements=1/1; linear={0}; visible words=1; i=0..7    │ 10       │ R, W        │
+│ POE.DEVICE.PF_TO_VF.SLOT[i].BUSINESS.REGISTER     │ POE.pf.GROUP_SHARED         │ 0x00220080 + x0*0x00000000 + i*0x00100000                 │ 32-bit                                 │ elements=1/1; linear={0}; visible words=1; i=0..7    │ 10       │ R, W        │
+│ POE.DEVICE.PF_TO_VF.SLOT[i].BUSINESS.vf           │ POE.vf[0].QUEUE             │ 0x00220100 + x0*0x00000020 + x1*0x00000004 + i*0x00100000 │ 32-bit; dims=[2,4]; strides=[0x20,0x4] │ elements=8/8; linear={0..7}; visible words=8; i=0..7 │ 0        │ R, W        │
+│ POE.DEVICE.VF.VF_WINDOW[i].MODULE.module          │ POE.module.DEVICE_ID        │ 0x01000000 + x0*0x00000000 + i*0x00200000                 │ 32-bit                                 │ elements=1/1; linear={0}; visible words=1; i=0..7    │ 0        │ R, W:ignore │
+│ POE.DEVICE.VF.VF_WINDOW[i].MODULE.module          │ POE.module.STATUS           │ 0x01000008 + x0*0x00000000 + i*0x00200000                 │ 32-bit                                 │ elements=1/1; linear={0}; visible words=1; i=0..7    │ 0        │ R, W:ignore │
+│ POE.DEVICE.VF.VF_WINDOW[i].MODULE.module          │ POE.module.TIMESTAMP        │ 0x01000020 + x0*0x00000000 + i*0x00200000                 │ 64-bit                                 │ elements=1/1; linear={0}; visible words=2; i=0..7    │ 0        │ R, W:ignore │
+│ POE.DEVICE.VF.VF_WINDOW[i].MODULE.module          │ POE.module.STATS            │ 0x01000080 + x0*0x00000004 + i*0x00200000                 │ 32-bit; dims=[4]; strides=[0x4]        │ elements=4/4; linear={0..3}; visible words=4; i=0..7 │ 0        │ R, W:ignore │
+│ POE.DEVICE.VF.VF_WINDOW[i].BUSINESS.vf            │ POE.vf[0].CONTROL           │ 0x01020000 + x0*0x00000000 + i*0x00200000                 │ 32-bit                                 │ elements=1/1; linear={0}; visible words=1; i=0..7    │ 0        │ R, W        │
+│ POE.DEVICE.VF.VF_WINDOW[i].BUSINESS.vf            │ POE.vf[0].STATUS            │ 0x01020008 + x0*0x00000000 + i*0x00200000                 │ 32-bit                                 │ elements=1/1; linear={0}; visible words=1; i=0..7    │ 0        │ R, W        │
+│ POE.DEVICE.VF.VF_WINDOW[i].BUSINESS.REGISTER      │ POE.pf.CPU_SHARED           │ 0x01020040 + x0*0x00000000 + i*0x00200000                 │ 32-bit                                 │ elements=1/1; linear={0}; visible words=1; i=0..7    │ 10       │ R, W        │
+│ POE.DEVICE.VF.VF_WINDOW[i].BUSINESS.REGISTER      │ POE.pf.GROUP_SHARED         │ 0x01020080 + x0*0x00000000 + i*0x00200000                 │ 32-bit                                 │ elements=1/1; linear={0}; visible words=1; i=0..7    │ 10       │ R, W        │
+│ POE.DEVICE.VF.VF_WINDOW[i].BUSINESS.vf            │ POE.vf[0].QUEUE             │ 0x01020100 + x0*0x00000020 + x1*0x00000004 + i*0x00200000 │ 32-bit; dims=[2,4]; strides=[0x20,0x4] │ elements=8/8; linear={0..7}; visible words=8; i=0..7 │ 0        │ R, W        │
+│ POE.DEVICE.VF.VF_WINDOW[i].VF_COMMAND.vf_commands │ POE.vf_commands[0].DOORBELL │ 0x01100010 + x0*0x00000000 + i*0x00200000                 │ 32-bit                                 │ elements=1/1; linear={0}; visible words=1; i=0..7    │ 0        │ R, W        │
+└───────────────────────────────────────────────────┴─────────────────────────────┴───────────────────────────────────────────────────────────┴────────────────────────────────────────┴──────────────────────────────────────────────────────┴──────────┴─────────────┘
+x0..xN are register coordinates (0 <= xd < dims[d]); add a byte lane within the register. Formulas describe declared geometry, not continuous coverage; visible selection excludes shadowed elements/words. Repeats with identical visible selections show one representative per family; exceptions stay explicit.

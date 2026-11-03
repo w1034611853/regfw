@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "runtime",
+    "rust-client",
+]
+resolver = "2"

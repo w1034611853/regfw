@@ -1,0 +1,23 @@
+ADDRESS EXPLANATION (static; user callbacks are not executed)
+BUS read 0x01420128 size=4 bytes
+  -> VIEW POE.DEVICE.VF.VF_WINDOW[2].BUSINESS.vf priority=0: 0x01420128 -> 0x00420128
+  -> IDENTITY POE.DEVICE.VF.VF_WINDOW[0] domain=1 request_id=2 resolver=VfRoute (bound) function=Device::route_vf
+     resolved_id=? in [0,7]
+     address formula: 0x01000000 + resolved_id * 0x00200000 + 0x00020128 -> aliases -> register
+     following target is the REQUEST BRANCH ONLY, not a resolved destination
+  -> WINDOW ACCESS allowed
+  -> REGISTER POE.DEVICE.PF_TO_VF.SLOT[2].BUSINESS.vf.QUEUE[1][2] width=32 bits byte_offset=0
+     entity=POE.vf[2].QUEUE request_element=6 at examples/pf_vf_layout.hpp:41
+  -> INDEX POOLS: LogicalPool=index[1] -> PhysicalPool when identity_domain(1) otherwise LogicalPool via PhysicalPool (not executed)
+  -> DESTINATION POE.vf[2].QUEUE element=? (index resolver result required); identity result also unresolved
+ADDRESS EXPLANATION (static; user callbacks are not executed)
+BUS read 0x01420128 size=4 bytes
+  -> VIEW POE.DEVICE.VF.VF_WINDOW[2].BUSINESS.vf priority=0: 0x01420128 -> 0x00420128
+  -> IDENTITY POE.DEVICE.VF.VF_WINDOW[0] domain=1 request_id=2 resolver=VfRoute (bound) function=Device::route_vf
+     resolved_id=6 (supplied assumption; resolver not executed)
+  -> VIEW POE.DEVICE.VF.VF_WINDOW[6].BUSINESS.vf priority=0: 0x01c20128 -> 0x00820128
+  -> WINDOW ACCESS allowed
+  -> REGISTER POE.DEVICE.PF_TO_VF.SLOT[6].BUSINESS.vf.QUEUE[1][2] width=32 bits byte_offset=0
+     entity=POE.vf[6].QUEUE request_element=6 at examples/pf_vf_layout.hpp:41
+  -> INDEX POOLS: LogicalPool=index[1] -> PhysicalPool when identity_domain(1) otherwise LogicalPool via PhysicalPool (not executed)
+  -> DESTINATION POE.vf[6].QUEUE element=? (index resolver result required)

@@ -1,0 +1,13 @@
+[package]
+name = "hlog-runtime"
+version = "3.2.1"
+edition = "2021"
+build = "build.rs"
+
+[lib]
+name = "hlog"
+crate-type = ["cdylib"]
+
+[dependencies]
+ctor = "0.4"
+spdlog-rs = "0.5.3"

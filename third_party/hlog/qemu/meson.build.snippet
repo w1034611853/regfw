@@ -1,0 +1,29 @@
+# Add hlog-loader.c to the system-emulator source set. The loader uses GLib's
+# GModule API, not libdl directly. Keep this dependency explicit so the loader
+# also builds when QEMU's normal modules and plugins options are both disabled.
+
+hlog_gmodule = dependency(
+  'gmodule-no-export-2.0',
+  version: glib_req_ver,
+  required: true,
+  method: 'pkg-config',
+)
+
+system_ss.add(files('hlog-loader.c'), hlog_gmodule)
+
+# Install/copy hlog-loader.h as include/qemu/hlog-loader.h. hlog-loader.c
+# registers its native -readconfig group through opts_init(). Keep the optional
+# early preload inside load_object_plugins(), before model DSOs are opened:
+#
+#   qemu_hlog_preload_from_env();
+#
+# After the complete command-line/-readconfig option loop, apply the rules:
+#
+#   if (!qemu_hlog_apply_config_rules(&error_fatal)) {
+#       exit(EXIT_FAILURE);
+#   }
+#
+# No qemu-options.hx change is required. A typical launch is:
+#
+#   HLOG_PATH=/absolute/path/to/libhlog.so.1 \
+#   qemu-system-aarch64 -readconfig /absolute/path/to/hlog.conf ...

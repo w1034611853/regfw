@@ -1,0 +1,32 @@
+# CMake / Ninja / Make outputs
+/build/
+/build-*/
+/cmake-build-*/
+/CMakeFiles/
+/CMakeCache.txt
+/Testing/
+compile_commands.json
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.gch
+*.pch
+*.gcda
+*.gcno
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+._*
+__pycache__/
+*.py[cod]
+# Local diagnostics and profile results
+*.profraw
+*.profdata
+perf.data*
+/core
+*.core

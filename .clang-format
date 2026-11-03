@@ -1,0 +1,25 @@
+# regfw 0.37.0: legible C++20 sources; clang-format 17+
+BasedOnStyle: LLVM
+IndentWidth: 4
+ContinuationIndentWidth: 4
+ColumnLimit: 100
+TabWidth: 4
+UseTab: Never
+BreakBeforeBraces: Attach
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: Empty
+BinPackArguments: false
+BinPackParameters: false
+SortIncludes: Never
+ReflowComments: true
+NamespaceIndentation: None
+IndentCaseLabels: true
+AlwaysBreakTemplateDeclarations: Yes
+PointerAlignment: Left
+SpaceBeforeParens: ControlStatements
+MaxEmptyLinesToKeep: 2
+DerivePointerAlignment: false

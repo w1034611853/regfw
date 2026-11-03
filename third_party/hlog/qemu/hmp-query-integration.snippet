@@ -1,0 +1,83 @@
+# Extend the existing HMP hlog wrapper with one optional final string. QEMU's
+# HMP parser treats this as one string, so quote it when it contains spaces.
+#
+# There are three independent availability states:
+#
+# 1. The HMP wrapper below is compiled into QEMU and may always be visible.
+# 2. qemu_hlog_control_available() becomes true only after the optional
+#    libhlog runtime is preloaded and the QMP command "hlog" is registered.
+# 3. A module query such as bmu/0/map-table exists only after that module calls
+#    hlog_query_register(). A missing query is not a runtime-load failure.
+#
+# If state 2 is false, report "hlog runtime is not available". Do not describe
+# it as a missing module query.
+#
+# hmp-commands.hx (adapt field/function names to the existing hlog entry):
+
+    {
+        .name       = "hlog",
+        .args_type  = "action:s,target:s?,value:s?",
+        .params     = "show|set|flush|console|query-list|query-help|query [target] [value]",
+        .help       = "control hlog; console [on|off|show]; query-list [module[/instance[/query]]]",
+        .cmd        = hmp_hlog,
+    },
+
+# In the existing hmp_hlog() wrapper, build the QMP argument dictionary as
+# follows before calling qemu_hlog_qmp_handler(). The wrapper's existing QObject
+# rendering/error handling stays unchanged.
+#
+# QEMU 10.2 names the nested-QDict accessor qdict_get_qdict(). For example:
+#
+#     QDict *query = qdict_get_qdict(result, "query");
+#
+# qdict_get_dict() is not a QEMU 10.2 API and fails under -Werror.
+
+const char *action = qdict_get_try_str(qdict, "action");
+const char *target = qdict_get_try_str(qdict, "target");
+const char *value = qdict_get_try_str(qdict, "value");
+QDict *args = qdict_new();
+
+qdict_put_str(args, "action", action ? action : "show");
+if (target && *target) {
+    qdict_put_str(args, "target", target);
+}
+if (value && *value) {
+    if (action && !g_ascii_strcasecmp(action, "set")) {
+        qdict_put_str(args, "level", value);
+    } else if (action && !g_ascii_strcasecmp(action, "query")) {
+        qdict_put_str(args, "args", value);
+    } else if (action && !g_ascii_strcasecmp(action, "console")) {
+        /* Forward so the runtime control handler rejects surplus arguments. */
+        qdict_put_str(args, "args", value);
+    }
+}
+
+qemu_hlog_qmp_handler(args, &ret, &err);
+qobject_unref(QOBJECT(args));
+
+# Examples:
+#
+#   hlog console
+#   hlog console on
+#   hlog console off
+#   hlog query-list
+#   hlog query-list bmu
+#   hlog query-list bmu/0
+#   hlog query-help bmu/0/map-table
+#   hlog query bmu/0/map-table vf=3
+#   hlog query bmu/0/map-table "vf=3 l_pool=1"
+#
+# query-list forwards its optional module/instance filter as "target" above.
+# Matching is case-sensitive and requires complete '/'-separated components:
+# bmu excludes bmu2, and bmu/1 excludes bmu/10. No match returns an empty list.
+
+# In the response-rendering branch of hmp_hlog(), handle action "console":
+#
+#     monitor_printf(mon, "HLOG console mirror: %s (stderr)\n",
+#                    qdict_get_bool(result, "console_enabled") ? "on" : "off");
+#
+# You can instead replace the whole existing hmp_hlog() with the supplied
+# hmp-hlog.c.inc. Do not define hmp_hlog twice.
+# This switch is global (including future/renamed loggers) and does not change
+# file log levels. Explicit HLOG_CONSOLE_* calls are unaffected by the switch.
+# stderr means the host process console, NOT a separate -serial tcp/pty window.

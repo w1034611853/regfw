@@ -1,0 +1,42 @@
+# No qemu-options.hx entry and no new command-line switch are required.
+# hlog-loader.c registers [hlog "target"] through QEMU's existing
+# QemuOpts/opts_init mechanism.
+
+# system/vl.c: include with the other QEMU-local headers.
+
+#include "qemu/hlog-loader.h"
+
+
+# load_object_plugins(): preload early, before model DSOs. No HLOG_PATH means
+# a silent no-op and QEMU remains usable without hlog.
+
+qemu_hlog_preload_from_env();
+
+
+# qemu_init(): call after the complete command-line/-readconfig option loop.
+# Rules update loggers already registered by plugins and all future loggers.
+
+if (!qemu_hlog_apply_config_rules(&error_fatal)) {
+    exit(EXIT_FAILURE);
+}
+
+
+# hlog.conf
+
+[hlog "all"]
+level = "warn"
+
+[hlog "bmu"]
+level = "info"
+
+[hlog "bmu/2"]
+level = "debug"
+
+[hlog "crg"]
+level = "off"
+
+
+# Command line
+
+HLOG_PATH=/absolute/path/to/hlog/lib/libhlog.so.1 \
+qemu-system-aarch64 -readconfig /absolute/path/to/hlog.conf ...

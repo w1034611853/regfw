@@ -1,0 +1,125 @@
+{
+ "compiler": "g++-16 (Homebrew GCC 16.2.0) 16.2.0",
+ "flags": "-std=c++20 -O1 -fno-strict-aliasing -I/Volumes/WD_1TBSSD/code/regfw/work/ds-0350/include -I/Volumes/WD_1TBSSD/code/regfw/work/ds-0350/third_party/hlog/include -I/Volumes/WD_1TBSSD/code/regfw/work/ds-0350/benchmarks -fconstexpr-ops-limit=268435456",
+ "sections": {
+  "compile": {
+   "dag_formula": {
+    "name": "dag_formula",
+    "wall_s_median": 1.54,
+    "maxrss_kib": 365296,
+    "object_bytes": 101840
+   },
+   "poe_formula": {
+    "name": "poe_formula",
+    "wall_s_median": 14.77,
+    "maxrss_kib": 1688144,
+    "object_bytes": 960240
+   },
+   "scale_formula": {
+    "name": "scale_formula",
+    "wall_s_median": 1.3,
+    "maxrss_kib": 325760,
+    "object_bytes": 79408
+   }
+  },
+  "init": {
+   "init_formula": {
+    "name": "init_formula",
+    "args": [
+     "dag",
+     "6"
+    ],
+    "construct_ns": 752750.0,
+    "resolver_ns": 500.0,
+    "finish_ns": 30334.0,
+    "describe_ns": 84.0,
+    "wall_construct_ns": 753000.0,
+    "wall_total_ns": 784000.0,
+    "maxrss_kib": 9984.0
+   }
+  },
+  "mmio": {
+   "mmio_dynamic": {
+    "4 mixed30 rw hot read regfw": 28.3524,
+    "4 mixed30 rw hot read switch_raw": 4.5554,
+    "4 mixed30 rw hot read switch_normalized": 4.4969,
+    "4 mixed30 rw hot write regfw": 28.5801,
+    "4 mixed30 rw hot write switch_raw": 4.709,
+    "4 mixed30 rw hot write switch_normalized": 4.9507,
+    "4 mixed30 rw random read regfw": 33.2756,
+    "4 mixed30 rw random read switch_raw": 24.8529,
+    "4 mixed30 rw random read switch_normalized": 24.824,
+    "4 mixed30 rw random write regfw": 32.3321,
+    "4 mixed30 rw random write switch_raw": 25.3201,
+    "4 mixed30 rw random write switch_normalized": 25.5411,
+    "4 mixed30 rw mapped read regfw": 77.8115,
+    "4 mixed30 rw mapped read switch_raw": 24.0942,
+    "4 mixed30 rw mapped read switch_normalized": 24.2532,
+    "4 mixed30 rw mapped write regfw": 77.136,
+    "4 mixed30 rw mapped write switch_raw": 22.8965,
+    "4 mixed30 rw mapped write switch_normalized": 22.8685,
+    "4 mixed30 callbacks hot read regfw": 51.8588,
+    "4 mixed30 callbacks hot read switch_raw": 5.9599,
+    "4 mixed30 callbacks hot read switch_normalized": 5.0901,
+    "4 mixed30 callbacks hot write regfw": 48.0407,
+    "4 mixed30 callbacks hot write switch_raw": 4.9876,
+    "4 mixed30 callbacks hot write switch_normalized": 5.1156,
+    "4 mixed30 callbacks random read regfw": 65.6046,
+    "4 mixed30 callbacks random read switch_raw": 25.704,
+    "4 mixed30 callbacks random read switch_normalized": 26.9432,
+    "4 mixed30 callbacks random write regfw": 58.2054,
+    "4 mixed30 callbacks random write switch_raw": 26.9133,
+    "4 mixed30 callbacks random write switch_normalized": 26.4365,
+    "4 mixed30 callbacks mapped read regfw": 105.8526,
+    "4 mixed30 callbacks mapped read switch_raw": 24.5507,
+    "4 mixed30 callbacks mapped read switch_normalized": 24.6636,
+    "4 mixed30 callbacks mapped write regfw": 99.1718,
+    "4 mixed30 callbacks mapped write switch_raw": 23.4337,
+    "4 mixed30 callbacks mapped write switch_normalized": 23.6176
+   },
+   "mmio_formula": {
+    "4 mixed30 rw hot read regfw": 28.0642,
+    "4 mixed30 rw hot read switch_raw": 4.7107,
+    "4 mixed30 rw hot read switch_normalized": 4.6218,
+    "4 mixed30 rw hot write regfw": 28.7653,
+    "4 mixed30 rw hot write switch_raw": 5.0557,
+    "4 mixed30 rw hot write switch_normalized": 4.6661,
+    "4 mixed30 rw random read regfw": 35.5618,
+    "4 mixed30 rw random read switch_raw": 25.1561,
+    "4 mixed30 rw random read switch_normalized": 24.8449,
+    "4 mixed30 rw random write regfw": 32.1578,
+    "4 mixed30 rw random write switch_raw": 24.6069,
+    "4 mixed30 rw random write switch_normalized": 25.7486,
+    "4 mixed30 rw mapped read regfw": 77.8137,
+    "4 mixed30 rw mapped read switch_raw": 24.3435,
+    "4 mixed30 rw mapped read switch_normalized": 23.5353,
+    "4 mixed30 rw mapped write regfw": 75.2275,
+    "4 mixed30 rw mapped write switch_raw": 22.7229,
+    "4 mixed30 rw mapped write switch_normalized": 23.2475,
+    "4 mixed30 callbacks hot read regfw": 51.0899,
+    "4 mixed30 callbacks hot read switch_raw": 5.9249,
+    "4 mixed30 callbacks hot read switch_normalized": 5.1239,
+    "4 mixed30 callbacks hot write regfw": 48.0615,
+    "4 mixed30 callbacks hot write switch_raw": 5.1913,
+    "4 mixed30 callbacks hot write switch_normalized": 4.9713,
+    "4 mixed30 callbacks random read regfw": 64.6261,
+    "4 mixed30 callbacks random read switch_raw": 26.2826,
+    "4 mixed30 callbacks random read switch_normalized": 25.3539,
+    "4 mixed30 callbacks random write regfw": 58.1167,
+    "4 mixed30 callbacks random write switch_raw": 25.7103,
+    "4 mixed30 callbacks random write switch_normalized": 25.7561,
+    "4 mixed30 callbacks mapped read regfw": 100.8108,
+    "4 mixed30 callbacks mapped read switch_raw": 24.4239,
+    "4 mixed30 callbacks mapped read switch_normalized": 24.3506,
+    "4 mixed30 callbacks mapped write regfw": 99.2524,
+    "4 mixed30 callbacks mapped write switch_raw": 23.7461,
+    "4 mixed30 callbacks mapped write switch_normalized": 23.2983
+   }
+  },
+  "scale": {
+   "name": "scale_formula",
+   "args": [],
+   "stdout": "RESULT construct=0.001037 finish=0.000020 maxrss_kb=10371072 scalar32_w_tps=104612190 scalar32_r_tps=165235257 identity_w_tps=19180917 sink=1099477549056"
+  }
+ }
+}

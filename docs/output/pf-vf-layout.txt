@@ -1,0 +1,37 @@
+COMPOSED ENTITY / VIEW LAYOUT (static; resolvers are not executed)
+Rows describe address views; entity: names referenced storage, not a new allocation. Ranges are mapping bounds, not occupied register spans.
+Folded repeats show the entity target/reset of the representative i=j=k=0 instance; a shared entity keeps the same target name across entrances.
+
+BUNDLE / ADDRESS LAYOUT
+┌───────────────────────────────────────────────────┬───────────────────────────────────────┬───────────────────────────────────────────────────────────────────┐
+│ Address view                                      │ Address range / formula               │ Purpose / storage target                                          │
+├───────────────────────────────────────────────────┼───────────────────────────────────────┼───────────────────────────────────────────────────────────────────┤
+│ POE                                               │ 0x00000000..0x01ffffff                │                                                                   │
+│ POE                                               │ 0x00000000..0x01ffffff                │ VIEW; priority=0                                                  │
+│ POE.DEVICE                                        │ 0x00000000..0x01ffffff                │ VIEW; priority=0                                                  │
+│ POE.DEVICE.PF                                     │ 0x00000000..0x00ffffff                │ VIEW; priority=0                                                  │
+│ POE.DEVICE.PF.MODULE                              │ 0x00000000..0x0001ffff                │ VIEW; priority=0                                                  │
+│ POE.DEVICE.PF.MODULE.module                       │ 0x00000000..0x0001ffff                │ VIEW → entity: POE.module; priority=0; reset=PF                   │
+│ POE.DEVICE.PF.PF_BUSINESS                         │ 0x00020000..0x000fffff                │ VIEW; priority=0                                                  │
+│ POE.DEVICE.PF.PF_BUSINESS.pf                      │ 0x00020000..0x000fffff                │ VIEW → entity: POE.pf; priority=0; reset=PF                       │
+│ POE.DEVICE.PF.PF_COMMAND                          │ 0x00100000..0x001fffff                │ VIEW; priority=0                                                  │
+│ POE.DEVICE.PF.PF_COMMAND.pf_commands              │ 0x00100000..0x001fffff                │ VIEW → entity: POE.pf_commands; priority=0; reset=PF              │
+│ POE.DEVICE.PF.RESERVED                            │ 0x00a00000..0x00ffffff                │ RESERVED; priority=0                                              │
+│ POE.DEVICE.PF_TO_VF                               │ 0x00200000..0x009fffff                │ VIEW; priority=0                                                  │
+│ POE.DEVICE.PF_TO_VF.SLOT[i]                       │ 0x00200000..0x002fffff + i*0x00100000 │ VIEW; priority=0; i=0..7                                          │
+│ POE.DEVICE.PF_TO_VF.SLOT[i].RESERVED              │ 0x00200000..0x0021ffff + i*0x00100000 │ RESERVED; priority=0; i=0..7                                      │
+│ POE.DEVICE.PF_TO_VF.SLOT[i].BUSINESS              │ 0x00220000..0x002fffff + i*0x00100000 │ VIEW; priority=0; i=0..7                                          │
+│ POE.DEVICE.PF_TO_VF.SLOT[i].BUSINESS.vf           │ 0x00220000..0x002fffff + i*0x00100000 │ VIEW → entity: POE.vf[0]; priority=0; reset=VF; i=0..7            │
+│ POE.DEVICE.PF_TO_VF.SLOT[i].BUSINESS.REGISTER     │ 0x00220040..0x00220043 + i*0x00100000 │ VIEW → entity: POE.pf.CPU_SHARED; priority=10; reset=PF; i=0..7   │
+│ POE.DEVICE.PF_TO_VF.SLOT[i].BUSINESS.REGISTER     │ 0x00220080..0x00220083 + i*0x00100000 │ VIEW → entity: POE.pf.GROUP_SHARED; priority=10; reset=PF; i=0..7 │
+│ POE.DEVICE.VF                                     │ 0x01000000..0x01ffffff                │ VIEW; priority=0                                                  │
+│ POE.DEVICE.VF.VF_WINDOW[i]                        │ 0x01000000..0x011fffff + i*0x00200000 │ VIEW; priority=0; i=0..7                                          │
+│ POE.DEVICE.VF.VF_WINDOW[i].MODULE                 │ 0x01000000..0x0101ffff + i*0x00200000 │ VIEW; priority=0; i=0..7                                          │
+│ POE.DEVICE.VF.VF_WINDOW[i].MODULE.module          │ 0x01000000..0x0101ffff + i*0x00200000 │ VIEW → entity: POE.module; priority=0; reset=PF; i=0..7           │
+│ POE.DEVICE.VF.VF_WINDOW[i].BUSINESS               │ 0x01020000..0x010fffff + i*0x00200000 │ VIEW; priority=0; i=0..7                                          │
+│ POE.DEVICE.VF.VF_WINDOW[i].BUSINESS.vf            │ 0x01020000..0x010fffff + i*0x00200000 │ VIEW → entity: POE.vf[0]; priority=0; reset=VF; i=0..7            │
+│ POE.DEVICE.VF.VF_WINDOW[i].BUSINESS.REGISTER      │ 0x01020040..0x01020043 + i*0x00200000 │ VIEW → entity: POE.pf.CPU_SHARED; priority=10; reset=PF; i=0..7   │
+│ POE.DEVICE.VF.VF_WINDOW[i].BUSINESS.REGISTER      │ 0x01020080..0x01020083 + i*0x00200000 │ VIEW → entity: POE.pf.GROUP_SHARED; priority=10; reset=PF; i=0..7 │
+│ POE.DEVICE.VF.VF_WINDOW[i].VF_COMMAND             │ 0x01100000..0x011fffff + i*0x00200000 │ VIEW; priority=0; i=0..7                                          │
+│ POE.DEVICE.VF.VF_WINDOW[i].VF_COMMAND.vf_commands │ 0x01100000..0x011fffff + i*0x00200000 │ VIEW → entity: POE.vf_commands[0]; priority=0; reset=VF; i=0..7   │
+└───────────────────────────────────────────────────┴───────────────────────────────────────┴───────────────────────────────────────────────────────────────────┘
