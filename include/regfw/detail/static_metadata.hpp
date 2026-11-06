@@ -90,7 +90,7 @@ using SymbolMemberValueT = typename SymbolMemberValue<Path, Member>::type;
             return {};                                                                             \
         });                                                                                        \
     static auto _regfw_auto_probe(::reg::detail::DeclarationIndex<_regfw_##NAME##_ordinal + 1>)    \
-        ->std::true_type;                                                                          \
+        -> std::true_type;                                                                         \
     template <class RegfwOwner>                                                                    \
     static constexpr auto _regfw_auto_member(                                                      \
         ::reg::detail::DeclarationIndex<_regfw_##NAME##_ordinal>) {                                \
@@ -105,4 +105,4 @@ using SymbolMemberValueT = typename SymbolMemberValue<Path, Member>::type;
     };                                                                                             \
     template <class RegfwOwner, class RegfwPath>                                                   \
     static auto _regfw_symbol_mixin(::reg::detail::DeclarationIndex<_regfw_##NAME##_ordinal>)      \
-        ->std::type_identity<_regfw_##NAME##_symbol<RegfwOwner, RegfwPath>>
+        -> std::type_identity<_regfw_##NAME##_symbol<RegfwOwner, RegfwPath>>
