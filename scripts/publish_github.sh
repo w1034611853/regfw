@@ -19,7 +19,7 @@ if [[ ! -d .git ]]; then
     user_id=$(gh api user --jq .id)
     git -c user.name="$login" \
         -c user.email="${user_id}+${login}@users.noreply.github.com" \
-        commit -m 'Release regfw 0.37.0'
+        commit -m "Import regfw source SDK"
 fi
 if origin=$(git remote get-url origin 2>/dev/null); then
     # Cloning the supplied Git bundle creates a local origin pointing to

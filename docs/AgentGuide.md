@@ -2,6 +2,10 @@
 
 # regfw 0.33.3：面向 Agent 的使用说明与 API 契约
 
+当前开发树的可选异步 SDK 见 [Async](Async.md)。端点在短状态锁内执行本文描述的原访问语义；耗时业务显式 defer，后台通过 with_state 更新 Bank。普通 RW、RC/FIFO、读返回值和动态路由保持即时语义，不能在状态锁内执行 DMA 或等待 worker。
+
+复杂回调拆分、FIFO pop/空值/后台 push、每 executor 一个 worker 和当前验收缺口，见 [异步设备改造指南](Async-Device-Guide.md)。
+
 适用版本：**regfw 0.33.3，配套 hlog 3.2.1，C++20**。本文根据该发布包的公开 API、运行时实现及测试核对编写，供编写设备模型的 Agent 直接使用。本文描述当前行为，不把建议或未来能力写成已有 API。
 
 本文可以作为 SDK 根目录的新 README 使用。使用本版头文件时必须同时链接本版编译库；本版**不是 header-only 库**。不要从旧 Rust 实现、旧版 C++ 文档或通用寄存器框架经验推测接口。

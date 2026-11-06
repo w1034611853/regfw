@@ -1,4 +1,10 @@
-# regfw 0.37.0
+# regfw 0.38.0
+
+0.38.0 新增保持寄存器语义的 [异步执行入口](docs/Async.md)：代码选择同步/异步，前台用短状态锁执行原寄存器语义，显式捕获的耗时任务交给 worker，后台通过 `with_state` 更新寄存器。普通 RW 写后即时读回。
+
+本版验证记录见 [0.38.0 验证说明](docs/Validation-0.38.0.md)。
+
+接入复杂回调、FIFO、多线程业务前，阅读 [异步设备改造指南](docs/Async-Device-Guide.md)，其中包含空 FIFO 返回 0xff 的完整示例、锁与 worker 的边界以及尚需验证的场景。
 
 **Production backend: runtime-built shared EntityLayout Hash.** Existing REG,
 REG_LAYOUT, REG_LAYOUT_IMPL, View/Repeat, resolver, callback, transaction and
@@ -25,7 +31,7 @@ See [0.37.0 重构报告](RELEASE-REPORT-0.37.0.md), [模块架构说明](docs/A
 [layout compilation](docs/LayoutCompilation.md), and
 [0.37.0 validation](VALIDATION.md).
 
-**0.37.0 只调整源码组织和格式，不调整公开 DSL、寄存器访问语义或快照格式。**
+**0.38.0 新增可选异步业务执行与并发排空；原直接 Map API 和快照格式保留。** 历史 0.37.0 仅调整源码组织和格式。新版头文件与库须配套重编译，接入说明见 [迁移指南](docs/Migration.md)。
 
 C++20 寄存器框架。`REG_ENTITY` 创建存储，`reg::view(name,size)` 组合可复用的局部布局，`reg::address_space(name)` 将同一 View 挂载到多个 64 位地址入口。框架管理解码、回调、复位、事务与完整快照。
 

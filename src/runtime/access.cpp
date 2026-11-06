@@ -527,6 +527,11 @@ std::optional<RegMemTxResult> RegisterMap::prepare(Resolution& r) {
     try {
         validate_access(r);
         derive(r);
+        if (access_admission_) {
+            auto result = access_admission_(*r.entry.node, r.info);
+            if (result != RegMemTxResult::Ok)
+                return result;
+        }
         return {};
     } catch (const Error& e) {
         log_error("access mapping/validation", r.entry.node->name, &r.info);
@@ -1255,7 +1260,7 @@ RegisterMap::try_mmio_write_sized(std::uint64_t address, RegData value, unsigned
         if (compiled_view_mode_ && finalized_ && size == 4 && !(address & 3))
             plan = formula_->fast_access(address, *access_scratch_);
         const auto* selected = plan ? plan->metadata : nullptr;
-        if (plan && !pre_access_) {
+        if (plan && !pre_access_ && !access_admission_) {
             switch (plan->write_path) {
                 case CompiledAccess::Path::Scalar:
                     if (fast_scalar<true>(address, value, plan))
@@ -1334,7 +1339,7 @@ RegMmioReadResult RegisterMap::try_mmio_read_sized(std::uint64_t address, unsign
         if (compiled_view_mode_ && finalized_ && size == 4 && !(address & 3))
             plan = formula_->fast_access(address, *access_scratch_);
         const auto* selected = plan ? plan->metadata : nullptr;
-        if (plan && !pre_access_) {
+        if (plan && !pre_access_ && !access_admission_) {
             switch (plan->read_path) {
                 case CompiledAccess::Path::Scalar:
                     if (auto fast = fast_scalar<false>(address, 0, plan))

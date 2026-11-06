@@ -1,3 +1,9 @@
+# 0.38.0：可选异步入口
+
+原有直接 Map 同步设备不需要迁移。新增 `<regfw/async.hpp>` 的 `ExecutionMode` 模板参数固定模式。两种端点都以短 Bank 状态锁调用原寄存器引擎，普通 RW、W1C/RC/FIFO、读返回值和路由即时生效；同步端点不分配 worker/队列。耗时写回调需要拆成锁内参数捕获和 `defer`，对应实体声明在 `deferred_writes`，后台通过 `with_state` 更新 Bank。不能把任意长回调原封不动放在状态锁内。实际代码与生命周期见 [Async](Async.md)。QEMU bridge 增加端点重载，原 Map 重载保留。安装包的 `Threads::Threads` 依赖由 config 自动查找；头文件和库必须配套重编译。
+
+旧异步原型不是稳定发布接口：前台发布副本及 `publish`、`publish_value`、`publish_last`、`refresh_routes`、`auto_publish`、`after_event`、端点 `invoke` 已删除。普通访问不再入队，也不需要刷新路由；外部短状态操作改用 `with_state`，明确的重任务使用 `post`，on_write 捕获使用 `defer`。原始位域不能绕过端点的状态锁并发访问。
+
 # 0.36.0 的内部建表迁移
 
 正式生产后端是原生单遍布局生成 + 共享 EntityLayout Hash。公开 API、DSL、MMIO、Snapshot 均不变；依赖 `reg::detail::compile_formula_layout` 的私有代码必须迁移到 `reg::detail::build_formula_layout_runtime`，但设备业务源码不应依赖这些私有符号。几何布局错误从编译期诊断迁为初始化期配置错误。

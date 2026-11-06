@@ -58,6 +58,7 @@ struct LayoutWarning {
 };
 namespace detail {
 class ViewCompiler;
+class AsyncBackend;
 class ViewDescription;
 class FormulaInstaller;
 std::string declaration(std::string_view name,

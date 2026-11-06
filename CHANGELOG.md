@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.38.0
+
+- Add compile-time synchronous/asynchronous register endpoints and a bounded single-worker executor. Immediate register semantics stay on the caller thread under a per-Bank state lock; explicitly captured heavy work runs outside that lock.
+- Add `deferred_writes`, `defer` and `with_state`, command admission before register mutation, and QEMU bridge overloads. Preserve ordinary RW readback, RC/W1C/FIFO, live routing and wide transactions. Direct Map APIs remain available; rebuild headers and library together.
+- Fix concurrent `drain()` livelock by waiting for queued, executing and reserved work to finish; simultaneous drain callers do not occupy queue slots. Include descendant tasks and reservation cancellation in the completion condition.
+- Add concurrency, captured-command, partial-access, routing, queue-full and lifecycle regression tests, including 2/8/80 simultaneous drain callers. Export the CMake Threads dependency.
+- Document complex callback migration, FIFO locking and invalid reads, worker ownership, backpressure, external completion lifetime and unsupported production scenarios.
+- Validation details and reproducible SDK commands: [0.38.0 validation](docs/Validation-0.38.0.md).
+
 ## 0.37.0
 
 **Readability / modularization release (no intended API or behavior changes).**

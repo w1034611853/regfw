@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 if(POLICY CMP0144)
   cmake_policy(SET CMP0144 NEW)
 endif()
-project(register_framework_cpp VERSION 0.37.0 LANGUAGES C CXX)
+project(register_framework_cpp VERSION 0.38.0 LANGUAGES C CXX)
 # Implementation modules: public include/regfw/* paths remain unchanged.
 add_library(regfw STATIC
   src/dsl/declarations.cpp
@@ -10,6 +10,7 @@ add_library(regfw STATIC
   src/layout/formula.cpp
   src/layout/instantiate.cpp
   src/runtime/access.cpp
+  src/runtime/async.cpp
   src/runtime/behaviors.cpp
   src/runtime/bindings.cpp
   src/runtime/callbacks.cpp
@@ -38,6 +39,8 @@ if(NOT HLog_ROOT AND NOT HLOG_ROOT AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third
 endif()
 find_package(HLog REQUIRED MODULE)
 target_link_libraries(regfw PUBLIC HLog::HLog)
+find_package(Threads REQUIRED)
+target_link_libraries(regfw PUBLIC Threads::Threads)
 include(cmake/RegfwPch.cmake)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -65,6 +68,9 @@ endif()
 
 if(REGFW_BUILD_TESTS)
   enable_testing()
+  add_executable(regfw_async_test tests/async.cpp)
+  target_link_libraries(regfw_async_test PRIVATE regfw::regfw)
+  add_test(NAME async COMMAND regfw_async_test)
   add_test(NAME example_quickstart COMMAND regfw_quickstart)
   add_test(NAME example_pf_vf COMMAND regfw_pf_vf)
   add_test(NAME example_pf_vf_full COMMAND regfw_pf_vf --layout-full)

@@ -1,6 +1,25 @@
-# regfw 0.37.0：开发与集成约定
+# regfw 0.38.0：开发与集成约定
 
-代码导航见 [模块架构](docs/Architecture.zh-CN.md) 和 [私有实现目录](src/README.md)。`include/regfw/` 是稳定公开入口，`src/internal/` 不对外安装。本版本只进行结构与格式整理，不改变业务接口。
+0.38.0 已实现保持 guest 语义的可选异步执行，见 [Async](docs/Async.md)。`RegisterEndpoint<ExecutionMode::...>` 仅在代码中选择同步/异步，无动态切换；原直接 Map API 保留。
+
+迁移复杂回调或 FIFO 前必读 [异步设备改造指南](docs/Async-Device-Guide.md)。当前约定如下，优先于后文历史版本中不涉及端点的并发描述：
+
+- “短锁”由代码范围保证，没有自动限时；resolver/pre_access/短回调也会延长前台持锁。复杂写拆成锁内接收与参数捕获、锁外重任务、with_state 提交完成。不能把要求本次读直接返回结果的耗时读自动改成后台读。
+- FIFO 的 empty/front/pop/返回在同一个 on_read 内完成，空值按协议返回（指南示例 0xff）。回调已有 Bank 锁，不重复加锁；worker/外部线程的 push、count、清空使用同一端点 with_state。普通容器没有自动保护，多 Bank 共用 FIFO 时各自的 Bank 锁不够。
+- 明确 FIFO 满、访问宽度、无效值和 COUNT/DATA 间竞态；FIFO 外部存储不自动进入 Bank 快照。回调返回值才是本次读响应，不能只改 ref 后返回 void 期待重新取值。
+- 每个 AsyncExecutor 一个 worker，多个端点可共享；端点和 with_state 不自动新建/切换线程。当前宿主四设备共用一个 worker，MMIO 短回调在调用线程，timer/CPU work 在各自上下文。多 executor 配置尚未纳入当前四设备压测。
+- 不夸大已验证范围：共享 worker 长任务阻塞、真实负载持锁/等锁尾延迟、业务完成额度、异常/部分 DMA 失败、跨 executor 等待环、IRQ、非 quiesced reset 和暂停/迁移均需按设备协议补充设计/验收。close/drain 不替代外部回调源的停止和排空。
+- 并发 drain 活锁已修复：等待者不再入队，而以条件变量等待 count=0、reserved=0、executing=false；多个调用者可共同等待。任务含捕获对象清理完成、预留取消后检查并通知。仍需停止外部生产者并维持 executor 生命周期；drain 不排空外部回调源。回归覆盖 2/8/80 调用者、满队列、后继、执行中/异常任务、预留提交/取消和 worker 自等。
+
+- 一个 Map 只挂一个端点；原引擎的解析、RW/W1C/RC/FIFO、宽事务和短回调在 Bank 状态锁内即时执行。普通 RW 写后读新值，轮询和普通访问不入队。
+- 耗时写业务通过 `AsyncAccessOptions::deferred_writes` 声明实体，on_write 在锁内复制参数并调用一次 `defer`。实际解析目标预留槽成功后才执行寄存器行为；worker 不 replay MMIO。
+- worker 的 DMA/计算在锁外执行；访问真实 Bank 用 `with_state`。短 on_read/on_write 已有锁，原生 `.bits`/`.ref()` 可直接使用，禁止嵌套状态区或逃逸裸引用。
+- 不持状态锁/队列锁获取 BQL、调用 DMA、等待线程或另一 Bank；框架会拒绝嵌套状态区、锁内 executor 等待及 worker 自等。设备外部调用入口使用 `state_lock_held()` 断言。
+- 无发布副本/全量扫描/路由镜像。旧原型的 publish、refresh_routes、auto_publish、after_event 和端点 invoke 已移除；动态路由每次按当前状态解析。
+- 队列满在行为和回调之前明确拒绝。设备需按真实协议控制最大在途数/背压；任意回调自身异常不提供原生字段回滚。关闭前停止外部调用，端点排空自身任务及后继后解除 Map 挂载。
+- 新实现 `src/runtime/async.cpp`，访问引擎的 admission 位于 `src/runtime/access.cpp::prepare`。运行全 CTest、文档检查及安装消费者；原生 async 用例也已通过 TSan。父工程 `scripts/validate-sdk.sh --tsan` 可复现，完整 QEMU 验证见父工程 SDK 报告。
+
+代码导航见 [模块架构](docs/Architecture.zh-CN.md) 和 [私有实现目录](src/README.md)。`include/regfw/` 是稳定公开入口，`src/internal/` 不对外安装。基线 0.37.0 只做结构整理；0.38.0 新增上文说明的异步扩展。
 
 当前生产后端是 **View Range → Shared EntityLayout Hash → Prepared AccessInfo → Existing Access Engine**。`REG_LAYOUT` 接口、REG DSL、MMIO、Resolver/PreAccess、Transaction、Callbacks、Snapshot、Reset 均保持原有行为。运行时的几何计划仅构建一次（按布局类型的函数局部静态对象）；每个 Bank 安装独立的 Entity storage 与访问上下文，共享 View 内地址映射形状。
 

@@ -811,6 +811,7 @@ struct AccessResolverSlot {
 };
 } // namespace detail
 class RegisterMap {
+    friend class detail::AsyncBackend;
     friend class Groups;
     friend class RegScope;
     friend class RegLayout;
@@ -857,6 +858,9 @@ class RegisterMap {
     bool log_enabled(HLogLevel level) const noexcept;
     void emit_log(const detail::LogRecord& record) const noexcept;
     bool finalized_{}, dispatching_{}, pre_access_active_{};
+    // Endpoint admission runs after resolution/validation, before behavior.
+    void* endpoint_owner_{};
+    std::function<RegMemTxResult(const Node&, const RegAccessInfo&)> access_admission_;
     struct ViewPolicy {
         std::uint64_t base, size;
         AliasAccessPolicy policy;

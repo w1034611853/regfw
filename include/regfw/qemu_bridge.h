@@ -17,6 +17,7 @@ typedef struct regfw_mmio_bridge {
 #ifdef __cplusplus
 }
 #include "regfw.hpp"
+#include "async.hpp"
 namespace reg {
 // A non-owning view: C opaque points at the map, not this temporary wrapper.
 struct QemuBridge {
@@ -35,6 +36,18 @@ struct QemuBridge {
 };
 inline regfw_mmio_bridge make_qemu_bridge(RegisterMap& map) noexcept {
     return QemuBridge(map).c_api();
+}
+template <ExecutionMode Mode>
+inline regfw_mmio_bridge make_qemu_bridge(RegisterEndpoint<Mode>& endpoint) noexcept {
+    return {&endpoint,
+            [](void* p, uint64_t a, uint64_t* value, unsigned size) noexcept -> uint32_t {
+                auto result = static_cast<RegisterEndpoint<Mode>*>(p)->read(a, size);
+                *value = result.value;
+                return result.qemu_bits();
+            },
+            [](void* p, uint64_t a, uint64_t value, unsigned size) noexcept -> uint32_t {
+                return static_cast<RegisterEndpoint<Mode>*>(p)->write(a, value, size).qemu_bits();
+            }};
 }
 } // namespace reg
 #endif

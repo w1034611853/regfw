@@ -30,3 +30,6 @@ __pycache__/
 perf.data*
 /core
 *.core
+
+# Restored from the tracked compressed hlog dependency
+/third_party/hlog/lib/libhlog.so.1.0.0
