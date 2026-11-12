@@ -61,7 +61,8 @@ void equivalent() {
     reg::RegisterBank<Layout> fast(reg::space().name("TEST")), generic(reg::space().name("TEST"));
     generic.map().set_pre_access([](const auto&) {});
     fast.finish();
-    generic.finish();
+    // An installed, unfinalized bank uses the generic engine. A global
+    // pre_access hook no longer forces that path on a finished bank.
     std::uint64_t seed = 0x9876543210abcdefULL;
     const unsigned offsets[] = {0, 4, 8, 12, 16, 20, 32, 36, 40, 48, 64, 72, 80, 88, 96, 255};
     for (unsigned k = 0; k < 15000; ++k) {
@@ -319,7 +320,8 @@ void mapped_equivalence() {
                     *count += value + i.index.linear();
                 });
         }
-        b->finish();
+        if (b == &fast)
+            b->finish();
     }
     std::uint64_t seed = 0x123456789abcdefULL;
     for (unsigned k = 0; k < 6000; ++k) {

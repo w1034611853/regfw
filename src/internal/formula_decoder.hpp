@@ -82,6 +82,7 @@ class FormulaDecoder {
         std::string_view view_name;
         std::uint32_t identity_index{STATIC_NONE};
         std::int32_t priority{};
+        std::uint8_t scalar_directions{};
         // The node owns live callback slots, transaction/snapshot state, and
         // storage. No function pointer or mutable state is snapshotted here.
     };
@@ -546,6 +547,16 @@ class FormulaDecoder {
                     mount.fast_mapped = eligible(&source);
             }
         }
+        for (auto& view : entity_views_)
+            for (auto& context : view.prepared) {
+                const auto& b = *context.binding;
+                const auto policy = static_cast<std::uint8_t>((context.policy.allow_read ? 1 : 0) |
+                                                              (context.policy.allow_write ? 2 : 0));
+                context.scalar_directions =
+                    context.identity_index == STATIC_NONE && !b.has_derivations
+                        ? static_cast<std::uint8_t>(b.scalar32_directions & policy)
+                        : 0;
+            }
     }
     RegisterMap::AliasEntry* decode(std::uint64_t address, RegisterMap::AliasEntry& out) const {
         const auto word = address & ~std::uint64_t{3};
@@ -555,87 +566,47 @@ class FormulaDecoder {
         fill_prepared(hit, word, out);
         return &out;
     }
-    // Scalar32/Mapped/Generic execution plan for a 4-byte aligned word, or
-    // nullptr for holes (the generic resolve path then reports them). Path
-    // selection mirrors finalize()'s per-word compilation; the difference is
-    // that it is derived per access from node traits, not a per-word table.
+    // Geometry and direction eligibility are prepared once per mount at
+    // finish. The hot path supplies only the element, live hooks/callbacks,
+    // and diagnostic context when it is actually needed.
     const RegisterMap::CompiledAccess* fast_access(std::uint64_t address,
                                                    RegisterMap::AccessScratch& scratch) const {
-        auto& plan = scratch.decoded_access;
         const auto word = address & ~std::uint64_t{3};
         PreparedHit hit{};
         if (!find_prepared(word, hit))
             return nullptr;
-        const Mount* mount = hit.context->mount;
-        const auto linear = hit.access->linear;
-        const auto byte = hit.access->byte;
         const auto& context = *hit.context;
-        const auto& scope = scopes_[mount->scope];
         const auto& binding = *context.binding;
-        auto& n = *binding.node;
+        auto& n = *context.node;
+        auto& plan = scratch.decoded_access;
         plan.metadata = nullptr;
         plan.node = &n;
         plan.mask = binding.writable_mask;
-        plan.directions = 0;
-        plan.mapped_directions = 0;
-        plan.scalar = nullptr;
-        // Common scalar register with no callback, pre-access, identity or
-        // derivation: the entire execution plan is node + scalar pointer.
-        // This is the hot Scalar32 shape and must not build an AliasEntry.
-        // Frozen geometry/traits come from the mount and binding snapshots;
-        // borrow, callbacks and the logger stay live per access.
-        if (mount->scalar && byte == 0 && binding.scalar_data && !scope.pre_access_chain &&
-            scope.identity == STATIC_NONE && !binding.has_derivations) {
-            const auto policy_bits = static_cast<std::uint8_t>((scope.policy.allow_read ? 1 : 0) |
-                                                               (scope.policy.allow_write ? 2 : 0));
-            const auto directions =
-                static_cast<std::uint8_t>(binding.scalar32_directions & policy_bits);
-            if (directions && !n.borrowed && !n.read_callback && !n.write_callback &&
-                !n.read_complete_callback && !owner_->logger_) {
-                plan.directions = directions;
-                plan.scalar = binding.scalar_data +
-                              (std::size_t(binding.linear) + linear) * binding.scalar_stride;
-                using Path = RegisterMap::CompiledAccess::Path;
-                plan.read_path = (directions & 1) ? Path::Scalar : Path::Generic;
-                plan.write_path = (directions & 2) ? Path::Scalar : Path::Generic;
-                return &plan;
-            }
-        }
-        // Use the already resolved hit to prepare the full context for
-        // callbacks, overlays, identity remapping and the generic engine.
+        plan.directions = context.scalar_directions;
+        plan.mapped_directions = context.mount->fast_mapped;
+        plan.scalar = plan.directions ? binding.scalar_data +
+                                            (std::size_t(binding.linear) + hit.access->linear) *
+                                                binding.scalar_stride
+                                      : nullptr;
+        using Path = RegisterMap::CompiledAccess::Path;
+        // Reuse the mapped executor for hook-only scalar accesses. Hooks
+        // must not disable the single-index fast path or be frozen at finish.
+        const bool hooks = owner_->pre_access_ || context.pre_access_chain;
+        const auto scalar_path = hooks ? Path::Mapped : Path::Scalar;
+        plan.read_path = (plan.directions & 1)          ? scalar_path
+                         : (plan.mapped_directions & 1) ? Path::Mapped
+                                                        : Path::Generic;
+        plan.write_path = (plan.directions & 2)          ? scalar_path
+                          : (plan.mapped_directions & 2) ? Path::Mapped
+                                                         : Path::Generic;
+        // A plain scalar needs no AliasEntry. Callback slots, borrow and
+        // logger remain live; nothing mutable is cached in the mount.
+        if (plan.directions && !hooks && !n.borrowed && !n.read_callback && !n.write_callback &&
+            !n.read_complete_callback && !owner_->logger_)
+            return &plan;
         auto& out = scratch.decoded[0];
         fill_prepared(hit, word, out);
         plan.metadata = &out;
-        const auto& e = *out.target_entry;
-        auto& target = *e.node;
-        const auto& target_binding = bindings_[mount->binding];
-        plan.node = &target;
-        plan.mask = target_binding.writable_mask;
-        const auto policy_bits = static_cast<std::uint8_t>((scope.policy.allow_read ? 1 : 0) |
-                                                           (scope.policy.allow_write ? 2 : 0));
-        if (out.available >= 4) {
-            if (out.identity_index) {
-                const auto& window = owner_->identities_[*out.identity_index];
-                if (window.mode == IdentityRemapMode::RedirectBank && window.count <= 64)
-                    plan.mapped_directions = mount->fast_mapped;
-            } else {
-                if (!out.pre_access_chain && e.byte_offset == 0 && !target_binding.has_derivations)
-                    plan.directions =
-                        static_cast<std::uint8_t>(target_binding.scalar32_directions & policy_bits);
-                if (target_binding.single_index)
-                    plan.mapped_directions = mount->fast_mapped;
-            }
-        }
-        plan.scalar = plan.directions ? target_binding.scalar_data +
-                                            std::size_t(e.linear) * target_binding.scalar_stride
-                                      : nullptr;
-        using Path = RegisterMap::CompiledAccess::Path;
-        plan.read_path = (plan.directions & 1)          ? Path::Scalar
-                         : (plan.mapped_directions & 1) ? Path::Mapped
-                                                        : Path::Generic;
-        plan.write_path = (plan.directions & 2)          ? Path::Scalar
-                          : (plan.mapped_directions & 2) ? Path::Mapped
-                                                         : Path::Generic;
         return &plan;
     }
     // Legacy scope ordering: deeper scopes win ties, higher priority wins at

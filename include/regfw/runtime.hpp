@@ -281,6 +281,24 @@ template <class F>
 void invoke_common_event(void* target, const void*, const RegAccessInfo& info) {
     (*static_cast<F*>(target))(info);
 }
+template <class F>
+std::shared_ptr<const EventCallback> bind_pre_access(F f) {
+    // Full and scalar-frame entry points share one callable, including its
+    // mutable state. Materialize only the info fields used by this hook.
+    if constexpr (std::is_pointer_v<F> || std::same_as<F, std::nullptr_t>) {
+        // Preserve std::function's empty/null-target behavior: invocation
+        // throws and follows the normal hook-failure path.
+        return bind_pre_access(std::function<void(const RegAccessInfo&)>(std::move(f)));
+    } else {
+        return bind_event(std::move(f),
+                          invoke_common_event<F>,
+                          [](void* target, RegData, const ScalarAccessFrame& frame) {
+                              frame.with_info([&](const RegAccessInfo& info) {
+                                  std::invoke(*static_cast<F*>(target), info);
+                              });
+                          });
+    }
+}
 template <class Info, class F>
 void invoke_info_event(void* target, const void*, const RegAccessInfo& info) {
     std::invoke(*static_cast<F*>(target), Info(info));
@@ -766,7 +784,7 @@ RegData checked_access_result(R result) {
 namespace detail {
 struct ViewPreAccessChain;
 struct PreAccessSlot {
-    using Function = std::function<void(const RegAccessInfo&)>;
+    using Function = EventCallback;
     std::string name;
     std::shared_ptr<const Function> callback;
     CallbackDescription description;
@@ -870,7 +888,7 @@ class RegisterMap {
     static std::uint64_t checked_map_size(std::uint64_t size);
     void require_initialized() const;
     using IdentityFn = std::function<std::uint32_t(const IdentityResolveRequest&)>;
-    using PreFn = std::function<void(const RegAccessInfo&)>;
+    using PreFn = detail::PreAccessSlot::Function;
     std::shared_ptr<const IdentityFn> identity_resolver_;
     detail::CallbackDescription identity_description_;
     bool identity_deferred_{};
@@ -958,6 +976,8 @@ class RegisterMap {
     void derive(Resolution& r);
     std::optional<RegMemTxResult> prepare(Resolution& r);
     bool pre(Resolution& r);
+    template <class Context>
+    bool pre(const Node& node, const detail::ViewPreAccessChain* chain, const Context& context);
     bool access_log_enabled(const Node&) const noexcept;
     void
     access_log(const Resolution& r, RegData value, std::string_view action = {}) const noexcept;
@@ -1225,7 +1245,7 @@ class RegisterMap {
     }
     template <class F>
     void set_pre_access(F f) {
-        bind_pre_access(std::make_shared<const PreFn>(std::move(f)));
+        bind_pre_access(detail::bind_pre_access(std::move(f)));
     }
     template <class Tag, class F>
     void set_pre_access(PreAccessKey<Tag> key,
@@ -1242,7 +1262,7 @@ class RegisterMap {
                       "pre_access must return void");
         bind_view_pre_access(key.id(),
                              key.name,
-                             std::make_shared<const PreFn>(std::move(f)),
+                             detail::bind_pre_access(std::move(f)),
                              detail::callback_description<F>(name, at));
     }
     template <class Tag>

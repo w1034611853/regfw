@@ -23,6 +23,8 @@
 
 当前生产后端是 **View Range → Shared EntityLayout Hash → Prepared AccessInfo → Existing Access Engine**。`REG_LAYOUT` 接口、REG DSL、MMIO、Resolver/PreAccess、Transaction、Callbacks、Snapshot、Reset 均保持原有行为。运行时的几何计划仅构建一次（按布局类型的函数局部静态对象）；每个 Bank 安装独立的 Entity storage 与访问上下文，共享 View 内地址映射形状。
 
+当前 MMIO 优化补丁允许全局 / View pre_access 复用 scalar / mapped scalar 执行器；空全局钩子不再强制通用路径。测试通用路径时使用已安装、未 finish 的 Bank。钩子复用 EventCallback 的 full/frame 入口，两个入口共享同一个可变闭包；保留 PreAccessGuard 的换绑/退休生命周期。完整 info 与按值复制仍有效，日志、resolver、钩子函数仍逐拍读取，不缓存解析结果。固定标量方向资格在 finish 写入每挂载的 prepared context。保持 admission 检查；有 deferred_writes 的端点仍走通用准入路径。详见 [MMIO 钩子性能](docs/Performance-Hooks.md)。
+
 已移除完整布局的 `consteval` 两遍 FormulaPlan、编译期稀疏元素排序以及旧 Zone/Run/PageDirectory 查找。构建期只保留单个声明类型的宽度、dims、strides 等轻量 constexpr 信息。不要重新引入逐 word `consteval` 输出或多级缓存。
 
 本版结构性非法布局（地址越界/Identity 嵌套/Repeat selector 越界等）在安装阶段抛错；仅声明/工厂捕获与轻量头使用约束仍在编译期检查。历史版本内容如下，**仅作历史参考，以当前源码和 0.36.0 文档为准**。

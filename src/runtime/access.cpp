@@ -543,16 +543,37 @@ std::optional<RegMemTxResult> RegisterMap::prepare(Resolution& r) {
 }
 
 bool RegisterMap::pre(Resolution& r) {
+    return pre(*r.entry.node, r.alias.pre_access_chain, r.info);
+}
+
+template <class Context>
+bool RegisterMap::pre(const Node& node,
+                      const detail::ViewPreAccessChain* chain,
+                      const Context& context) {
     const auto* fn = pre_access_.get();
-    const auto* chain = r.alias.pre_access_chain;
     if (!fn && !chain)
         return true;
+    auto invoke = [&](const PreFn& callback) {
+        if constexpr (std::same_as<Context, RegAccessInfo>)
+            callback(RegData{}, context);
+        else
+            callback.from_frame(0, context);
+    };
+    auto report = [&](std::string_view phase) {
+        if constexpr (std::same_as<Context, RegAccessInfo>)
+            log_error(phase, node.name, &context);
+        else if (log_enabled(HLOG_LEVEL_ERROR)) {
+            auto& info = access_scratch_->resolution.info;
+            context.fill(info);
+            log_error(phase, node.name, &info);
+        }
+    };
     PreAccessGuard guard(*this);
     if (fn)
         try {
-            (*fn)(r.info);
+            invoke(*fn);
         } catch (...) {
-            log_error("pre_access", r.entry.node->name, &r.info);
+            report("pre_access");
             return false;
         }
     if (chain)
@@ -562,11 +583,9 @@ bool RegisterMap::pre(Resolution& r) {
                 if (!callback)
                     throw Error("view pre_access is not bound: " + step.slot->name,
                                 ErrorKind::Configuration);
-                (*callback)(r.info);
+                invoke(*callback);
             } catch (...) {
-                log_error("view pre_access " + step.slot->name + " @ " + std::string(step.view),
-                          r.entry.node->name,
-                          &r.info);
+                report("view pre_access " + step.slot->name + " @ " + std::string(step.view));
                 return false;
             }
         }
@@ -1118,8 +1137,7 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const CompiledA
         }
     }
     if (pre_access_ || target->pre_access_chain) {
-        auto& r = resolution();
-        if (!pre(r))
+        if (!pre(n, target->pre_access_chain, frame))
             return RegMmioReadResult{writing ? 0 : REG_READ_CALLBACK_ERROR_MAGIC & 0xffffffff,
                                      writing ? RegMemTxResult::Ignored : RegMemTxResult::Ok};
     }
@@ -1260,7 +1278,7 @@ RegisterMap::try_mmio_write_sized(std::uint64_t address, RegData value, unsigned
         if (compiled_view_mode_ && finalized_ && size == 4 && !(address & 3))
             plan = formula_->fast_access(address, *access_scratch_);
         const auto* selected = plan ? plan->metadata : nullptr;
-        if (plan && !pre_access_ && !access_admission_) {
+        if (plan && !access_admission_) {
             switch (plan->write_path) {
                 case CompiledAccess::Path::Scalar:
                     if (fast_scalar<true>(address, value, plan))
@@ -1339,7 +1357,7 @@ RegMmioReadResult RegisterMap::try_mmio_read_sized(std::uint64_t address, unsign
         if (compiled_view_mode_ && finalized_ && size == 4 && !(address & 3))
             plan = formula_->fast_access(address, *access_scratch_);
         const auto* selected = plan ? plan->metadata : nullptr;
-        if (plan && !pre_access_ && !access_admission_) {
+        if (plan && !access_admission_) {
             switch (plan->read_path) {
                 case CompiledAccess::Path::Scalar:
                     if (auto fast = fast_scalar<false>(address, 0, plan))
