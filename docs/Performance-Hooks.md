@@ -2,6 +2,8 @@
 
 性能基线使用 **0.37.0 最后一个不含异步框架的提交** `cec42e1f3a25bd8804129ff4c349a0dd54128742`。候选是在该提交上应用同一核心优化，两个测量版本均无异步 admission。PR 集成目标是当前 main `fb37d681df861643aa0150459bd73c37f4d594dd`（0.38.0），保留其 admission；本页不把 0.38 与 0.37 的版本差额算作优化收益。
 
+本文 96 场景与初始化表记录首版补丁 `67d709a`；追加的上下文构造优化以首版为基线，独立结果见下节，未重跑完整 96 场景。
+
 2026-11-12 同机测量。这里是直接 RegisterMap 软件访问，未运行真实 QEMU dispatch，也不是硬件 MMIO 延迟。手写对照按 `pre_access → if/else 范围解码 → 1000-case switch → 存储/回调` 建模；范围数量与业务复杂度是合成负载，不声称复现某台设备的原代码。
 
 ## 为什么同一流程仍有差距
@@ -20,6 +22,40 @@
 3. 固定的标量资格与路径权限交集在 `finish()` 写入每挂载 prepared context，`fast_access()` 从约 80 行缩为约 40 行，减少重复元数据检查。仍使用原有 View / Hash 后端，不缓存 resolver 返回值。
 
 保持全局 → 目标父 View → 子 View 的钩子顺序、换绑/清除生命周期、异常行为、存储重读、RO/权限拒绝不执行钩子、宽事务每拍语义、动态日志和快照。头文件与库必须配套重编译。0.38 中配置 deferred_writes 的端点继续经过 admission 通用路径，本页不代表这种配置的收益。
+
+## 追加：没有上下文使用者时直接访问
+
+前端 API、RegAccessInfo 字段与复制语义均保持。identity resolver 选中目标之后，若没有 index 映射、pre_access 链、当前方向的寄存器回调或 logger，并且路径权限允许，就直接执行原生 32-bit RW 存储访问，省掉 MappedAccessFrame、ScalarAccessFrame 和上下文准备。读方向还检查 on_read_complete；写方向保留 writable_mask 合并。
+
+这些条件在 resolver 返回之后检查，因此 resolver 在本次访问内绑定 hook、读写回调或启用 logger 时仍立即生效。没有增加地址查找表、缓存 resolver 返回值或改变布局。已有消费者的路径继续提供完整 info。
+
+本节基线为首版补丁回移到 0.37 的二进制，候选为再加本次优化的 0.37 二进制，均无异步框架。使用同一基准源文件、GCC 14.2 / -O3 / 无 LTO，固定 CPU 0、多线程引用计数路径、8 VF、纯映射流量、无寄存器回调/日志、10 范围。5 轮进程配对，每进程 5 passes × 8 轮，去首轮后取中位数；最终跨进程取中位数。测量与编译不并行，正确性对照和版本间 checksum 均一致。
+
+| 转换 | 钩子 | 操作 | 首版补丁 ns | 本次候选 ns | 耗时变化 |
+|---|---|---|---:|---:|---:|
+| 仅 identity | 全局 | 读 | 116.88 | 117.36 | +0.41% |
+| 仅 identity | 全局 | 写 | 113.27 | 114.08 | +0.72% |
+| 仅 identity | 无 | 读 | 111.59 | 94.47 | -15.34% |
+| 仅 identity | 无 | 写 | 109.05 | 94.90 | -12.98% |
+| identity + index | 全局 | 读 | 146.05 | 140.62 | -3.72% |
+| identity + index | 全局 | 写 | 138.47 | 134.82 | -2.63% |
+| identity + index | 无 | 读 | 135.14 | 134.62 | -0.39% |
+| identity + index | 无 | 写 | 131.55 | 130.60 | -0.72% |
+
+两项适用场景读/写分别减少 15.3% / 13.0%。对候选同一二进制重复运行的 4 场景 A/A 对照范围为 -3.3%～+4.4%；其余小幅变化不宣称为收益。该结果不代表带 index / hook 的通用上下文装配已被优化，也不是 QEMU 整机加速。
+
+复现选定场景（仍使用成套的 0.37 头文件与库）：
+
+```sh
+python3 benchmarks/measure_routes.py --baseline-prefix "$RESULTS/first-patch" \
+  --candidate-prefix "$RESULTS/candidate" --pairs 1-0 1-1 --ranges 10 \
+  --blocks 5 --passes 5 --out "$RESULTS/context"
+# A/A 对照将两个 prefix 都指向 candidate，使用 --pairs 1-0。
+```
+
+初始化逻辑、数据结构大小和分配量未改动；此次未重复测启动时间。GNU size 的 0.37 静态库目标节合计从首版的 949,442 增至 949,690 字节（+248 字节）。新增回归同时执行已 finish 与通用引擎，覆盖动态 identity、别名、掩码、只读拒绝、resolver 内即时绑定 hook/on_read/on_write、修改目标存储及 info 值复制。
+
+另两种内部原型没有纳入补丁：直接返回聚合构造的 Info 在这组 GCC 基准中慢约 16%～31%；让转换、钩子、事件统一复用完整 Info 时，index-only 变化约 -0.6%～-5.9%，identity+index 则慢约 4.7%～9.3%。减少源码中的临时对象，并不保证减少机器码中的字段写入；目前保留经验证有效的无消费者分支。
 
 ## 测量方法
 

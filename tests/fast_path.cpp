@@ -272,6 +272,90 @@ struct FieldLayout : reg::Bundle {
     });
 };
 REG_ACCESS_FIELD(Route, std::uint32_t);
+struct IdentityLayout : reg::Bundle {
+    REG_BUNDLE(IdentityLayout);
+    REG_REPEAT_ENTITY(vf, R, 2);
+    REG_LAYOUT([&] {
+        auto v = reg::view("DEVICE", 0x200)
+                     .map_repeat("VF", 0, reg::repeat(2).stride(0x100), [&](auto i) {
+                         return reg::view("INSTANCE", 0x100)
+                             .map(vf[i])
+                             .identity(7)
+                             .using_resolver(Route);
+                     });
+        return reg::address_space("ROOT").map(v, A).map(v, B).map(v.read_only_ignore_writes(), C);
+    });
+};
+void identity_without_context(bool finalized) {
+    reg::RegisterBank<IdentityLayout> b(reg::space().name("IDENTITY"));
+    auto& m = b.map();
+    unsigned flip = 1, pre = 0, reads = 0, writes = 0;
+    m.set_identity_resolver(Route, [&](const auto& req) {
+        return req.request_id ^ flip;
+    });
+    if (finalized)
+        b.finish();
+    b->vf[1].MASK.ref() = 0xa5a5a5a5;
+    CHECK(m.mmio_write(A + 4, 0x12345678).success());
+    CHECK(m.mmio_read(B + 4) == 0xa534a578 && b->vf[0].MASK.ref() == 0);
+    flip = 0;
+    CHECK(m.mmio_write(A + 4, 0xdeadbeef).success() && b->vf[0].MASK.ref() == 0x00ad00ef);
+    flip = 1;
+    CHECK(m.mmio_read(A + 4) == 0xa534a578);
+    CHECK(m.mmio_write(C + 4, 0).result == reg::RegMemTxResult::Ignored &&
+          b->vf[1].MASK.ref() == 0xa534a578);
+    // Bind consumers from the resolver: they must run on this very access.
+    reg::RegAccessInfo saved;
+    bool bound = false;
+    m.set_identity_resolver(Route, [&](const auto& req) {
+        b->vf[1].VALUE.ref() = 35;
+        if (!bound) {
+            m.set_pre_access([&](const reg::RegAccessInfo& i) {
+                ++pre;
+                saved = i;
+                b->vf[1].VALUE.ref() = 36;
+            });
+            bound = true;
+        }
+        return req.request_id ^ 1;
+    });
+    CHECK(m.mmio_read(A) == 36 && pre == 1 && saved.stored_before == 35 &&
+          saved.request_id() == 0 && saved.resolved_id() == 1 && saved.size == 4 &&
+          saved.address == A && saved.register_width_bits == 32 && !saved.wide_values);
+    auto retained = saved;
+    m.clear_pre_access();
+    bound = false;
+    m.set_identity_resolver(Route, [&](const auto& req) {
+        if (!bound) {
+            b->vf[1].VALUE.on_read([&](std::uint32_t value, const reg::RegAccessInfo& i) {
+                ++reads;
+                saved = i;
+                return value + 7;
+            });
+            bound = true;
+        }
+        return req.request_id ^ 1;
+    });
+    CHECK(m.mmio_read(B) == 43 && reads == 1 && saved.address == B);
+    // A read callback does not require constructing context on a plain write.
+    CHECK(m.mmio_write(A, 42).success() && reads == 1 && b->vf[1].VALUE.ref() == 42);
+    bound = false;
+    m.set_identity_resolver(Route, [&](const auto& req) {
+        b->vf[1].VALUE.ref() = 50;
+        if (!bound) {
+            b->vf[1].VALUE.on_write([&](std::uint32_t old, const reg::RegAccessInfo& i) {
+                ++writes;
+                CHECK(old == 50);
+                saved = i;
+            });
+            bound = true;
+        }
+        return req.request_id ^ 1;
+    });
+    CHECK(m.mmio_write(A, 55).success() && writes == 1 && saved.stored_before == 50 &&
+          saved.stored_after == 55 && saved.raw_data == 55 && saved.request_id() == 0 &&
+          saved.resolved_id() == 1 && retained.address == A && retained.stored_before == 35);
+}
 struct MappedLayout : reg::Bundle {
     REG_BUNDLE(MappedLayout);
     REG_REPEAT_ENTITY(vf, Fields, 4);
@@ -476,6 +560,8 @@ int main() try {
     callback_errors_and_dynamic_logging();
     field_lifetimes();
     mapped_equivalence();
+    identity_without_context(false);
+    identity_without_context(true);
     context_reset();
     std::cout << "PASS: fast/generic equivalence, dynamic binding, storage/snapshot lifetime, 16 "
                  "fields, mapped callback equivalence, context reuse and copied access info\n";

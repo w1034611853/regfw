@@ -1064,6 +1064,23 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const CompiledA
     auto entry = *target->target_entry;
     auto& n = *entry.node;
     n.check_borrow();
+    // Identity resolution has already selected the storage. If no following
+    // operation consumes access info, avoid constructing any callback context.
+    if (!n.single_index && !pre_access_ && !target->pre_access_chain && !logger_ &&
+        (writing ? policy.allow_write && !n.write_callback
+                 : policy.allow_read && !n.read_callback && !n.read_complete_callback)) {
+        auto* data = n.scalar_data + std::size_t(entry.linear) * n.scalar_stride;
+        std::uint32_t stored;
+        std::memcpy(&stored, data, 4);
+        if constexpr (Writing) {
+            const auto mask = std::uint32_t(n.writable_mask);
+            const auto after = (stored & ~mask) | (std::uint32_t(value) & mask);
+            std::memcpy(data, &after, 4);
+            return RegMmioReadResult{0};
+        } else {
+            return RegMmioReadResult{stored};
+        }
+    }
     detail::MappedAccessFrame mapped;
     mapped.source = source;
     mapped.target = target;

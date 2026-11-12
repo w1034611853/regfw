@@ -18,7 +18,12 @@ def main():
     parser.add_argument("--blocks", type=int, default=3)
     parser.add_argument("--passes", type=int, default=3)
     parser.add_argument("--cpu", type=int, default=min(os.sched_getaffinity(0)))
+    parser.add_argument("--pairs", nargs="+", choices=("0-0", "0-1", "1-0", "1-1"),
+                        default=["0-0", "0-1", "1-0", "1-1"])
+    parser.add_argument("--ranges", nargs="+", type=int, choices=(1, 10, 100))
     args = parser.parse_args()
+    pairs = list(dict.fromkeys(tuple(map(int, pair.split("-"))) for pair in args.pairs))
+    selected_ranges = list(dict.fromkeys(args.ranges)) if args.ranges else None
     if min(args.blocks, args.passes) < 1:
         parser.error("blocks and passes must be positive")
     args.out.mkdir(parents=True, exist_ok=True)
@@ -27,15 +32,17 @@ def main():
     binaries = {(version, identity, index): Path(f"{prefix}-{identity}-{index}").resolve()
                 for version, prefix in (("baseline", args.baseline_prefix),
                                         ("candidate", args.candidate_prefix))
-                for identity in (0, 1) for index in (0, 1)}
+                for identity, index in pairs}
     metadata = dict(cpu=args.cpu, blocks=args.blocks, passes=args.passes,
+                    pairs=pairs, ranges=selected_ranges,
                     binaries={str(k): dict(path=str(v), sha256=hashlib.sha256(v.read_bytes()).hexdigest())
                               for k, v in binaries.items()})
     (args.out / "environment.json").write_text(json.dumps(metadata, indent=2) + "\n")
     cases = [(i, x, hook, write, ranges)
-             for i in (0, 1) for x in (0, 1)
+             for i, x in pairs
              for hook in ("none", "global") for write in (0, 1)
-             for ranges in ((1, 10, 100) if i and x else (10,))]
+             for ranges in (selected_ranges if selected_ranges is not None
+                            else ((1, 10, 100) if i and x else (10,)))]
     records = []
     for block in range(args.blocks):
         random.Random(3700 + block).shuffle(cases)

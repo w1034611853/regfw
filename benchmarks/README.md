@@ -33,7 +33,7 @@ python3 benchmarks/measure_routes.py --baseline-prefix "$RESULTS/baseline" \
   --candidate-prefix "$RESULTS/candidate" --out "$RESULTS/routes"
 ```
 
-该测量包含 24 个场景：四种映射组合的无钩子/全局钩子读写（10 范围），以及双映射下的 1/100 范围敏感性对照。CPU/引用计数/进程配对规则与 `measure_hooks.py` 相同。不同功能组合的差额包含执行路径变化，不能当作严格可相加的单个函数耗时。
+默认测量包含 24 个场景：四种映射组合的无钩子/全局钩子读写（10 范围），以及双映射下的 1/100 范围敏感性对照。CPU/引用计数/进程配对规则与 `measure_hooks.py` 相同。不同功能组合的差额包含执行路径变化，不能当作严格可相加的单个函数耗时。可用 `--pairs 1-0 1-1 --ranges 10` 仅测 identity-only / 双转换的 8 个场景；两种 prefix 指向同一组二进制即可做 A/A 对照。
 
 ## 历史完整复测入口
 
