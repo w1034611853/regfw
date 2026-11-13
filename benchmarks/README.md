@@ -35,6 +35,12 @@ python3 benchmarks/measure_routes.py --baseline-prefix "$RESULTS/baseline" \
 
 默认测量包含 24 个场景：四种映射组合的无钩子/全局钩子读写（10 范围），以及双映射下的 1/100 范围敏感性对照。CPU/引用计数/进程配对规则与 `measure_hooks.py` 相同。不同功能组合的差额包含执行路径变化，不能当作严格可相加的单个函数耗时。可用 `--pairs 1-0 1-1 --ranges 10` 仅测 identity-only / 双转换的 8 个场景；两种 prefix 指向同一组二进制即可做 A/A 对照。
 
+## 分发查表与采样
+
+查表优化、剩余差距定位及编译成本见 [Performance-Dispatch.md](../docs/Performance-Dispatch.md)。`measure_routes.py --ranges 10` 测全部四种转换组合的 16 个读写/hook 场景。
+
+Linux x86-64 可把 `sample_ips.cpp` 链接进单布局基准，并用 `-no-pie` 生成诊断二进制。设置 `REGFW_SAMPLE_IPS=/absolute/samples.txt` 后收集 IP，使用 `python3 benchmarks/summarize_ips.py BINARY SAMPLES` 按符号汇总。采样运行会扰动时序，正式性能比较不链接/启用它。
+
 ## 历史完整复测入口
 
 ```bash

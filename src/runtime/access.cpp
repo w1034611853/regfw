@@ -1046,11 +1046,13 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const CompiledA
         identity = AccessIdentity{
             w.domain, req.request_id, id, w.mode, IdentityAddressSource::Bus, w.trace_labels};
         if (w.mode == IdentityRemapMode::RedirectBank) {
-            target =
-                source->redirect_targets
-                    ? source->redirect_targets[id]
-                    : view_entry(w.base + std::uint64_t(id) * w.stride + source->identity_inner,
-                                 access_scratch_->decoded[1]);
+            target = source->redirect_targets
+                         ? source->redirect_targets[id]
+                         : formula_->redirect(*source,
+                                              id,
+                                              w.base + std::uint64_t(id) * w.stride +
+                                                  source->identity_inner,
+                                              access_scratch_->decoded[1]);
             if (!target || !target->defined || !target->target_entry)
                 throw Error("unmapped entity view address", ErrorKind::Decode);
             if (route.is_direct())

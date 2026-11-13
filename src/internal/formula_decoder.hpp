@@ -4,7 +4,7 @@
 namespace reg {
 namespace detail {
 // Shared prepared-access decoder: View range + one immutable EntityLayout
-// hash + an instance-bound context. No Zone, Page, Run or per-access caches.
+// dense table or hash + an instance-bound context. No per-access caches.
 class FormulaDecoder {
   public:
     struct Scope {
@@ -60,12 +60,48 @@ class FormulaDecoder {
     // rank (1..MAX_REG_DIMS), not hard-coded index0/index1. Callback and
     // storage objects belong to a *mounted instance*, never to this layout.
     struct PreparedAccessInfo {
-        std::uint32_t ordinal{}, linear{}, byte{}, available{};
+        std::uint32_t ordinal{STATIC_NONE}, linear{}, byte{}, available{};
         RegElementIndex index{};
     };
     struct EntityHashLayout {
         std::unordered_map<std::uint64_t, PreparedAccessInfo> words;
         bool has_priority_aliases{};
+        // Compact spans use direct indexing; sparse/high addresses keep the
+        // hash. This table is built once at installation, never by consteval.
+        std::vector<PreparedAccessInfo> dense;
+        std::uint64_t dense_base{};
+        std::size_t key_count{};
+        const PreparedAccessInfo* find(std::uint64_t key) const noexcept {
+            if (!dense.empty()) {
+                const auto index = (key - dense_base) >> 2;
+                if (index >= dense.size())
+                    return nullptr;
+                const auto& access = dense[index];
+                return access.ordinal == STATIC_NONE ? nullptr : &access;
+            }
+            const auto it = words.find(key);
+            return it == words.end() ? nullptr : &it->second;
+        }
+        void compact() {
+            key_count = words.size();
+            if (words.empty())
+                return;
+            std::uint64_t first = UINT64_MAX, last = 0;
+            for (const auto& [key, access] : words) {
+                (void)access;
+                first = std::min(first, key);
+                last = std::max(last, key);
+            }
+            const auto slots = ((last - first) >> 2) + 1;
+            if (slots > key_count * 2)
+                return;
+            dense_base = first;
+            dense.resize(slots);
+            for (const auto& [key, access] : words)
+                dense[(key - first) >> 2] = access;
+            words.clear();
+            words.rehash(0);
+        }
     };
     // Bound once per mount. These stable references account for hooks,
     // per-instance storage, route, identity and access policy. A callback
@@ -92,6 +128,7 @@ class FormulaDecoder {
         std::vector<std::uint32_t> mounts; // mount ordinal -> per-instance binding
         std::vector<PreparedMountContext> prepared;
         std::shared_ptr<const EntityHashLayout> layout;
+        std::vector<const EntityView*> identity_targets;
     };
     struct PreparedHit {
         const EntityView* view{};
@@ -160,9 +197,17 @@ class FormulaDecoder {
                 const auto& sc = scopes_[group];
                 if (sc.size > UINT64_MAX - sc.base)
                     throw Error("entity hash: view range overflow", ErrorKind::Configuration);
-                entity_views_.push_back({sc.base, sc.base + sc.size, 0, group, {}, {}, {}});
+                entity_views_.push_back({sc.base, sc.base + sc.size, 0, group, {}, {}, {}, {}});
             }
             entity_views_[it->second].mounts.push_back(id);
+        }
+        for (auto& view : entity_views_) {
+            // The lookup interval need only cover mounted registers, not the
+            // entire parent View aperture (which may include other VF views).
+            view.base = mounts_[view.mounts.front()].base;
+            view.end = view.base;
+            for (const auto id : view.mounts)
+                view.end = std::max(view.end, mounts_[id].end);
         }
         for (auto& view : entity_views_) {
             // The mount vector is base-sorted, so the same Bundle declaration
@@ -224,6 +269,8 @@ class FormulaDecoder {
                     }
                 }
             }
+            layout->compact();
+            entity_hash_bytes_ += layout->dense.capacity() * sizeof(PreparedAccessInfo);
             entity_hash_bytes_ +=
                 layout->words.size() *
                     (sizeof(std::uint64_t) + sizeof(PreparedAccessInfo) + sizeof(void*) * 2) +
@@ -264,7 +311,7 @@ class FormulaDecoder {
             std::size_t keys = 0;
             for (const auto& v : entity_views_)
                 if (v.layout)
-                    keys += v.layout->words.size();
+                    keys += v.layout->key_count;
             std::fprintf(stderr,
                          "ENTITY_HASH_STATS views=%zu unique_layouts=%zu total_view_keys=%zu "
                          "approx_allocated_bytes=%zu\n",
@@ -272,6 +319,62 @@ class FormulaDecoder {
                          entity_layout_count_,
                          keys,
                          entity_hash_bytes_);
+        }
+    }
+    void prepare_identity_targets() {
+        for (auto& view : entity_views_) {
+            if (view.prepared.empty())
+                continue;
+            const auto identity = view.prepared.front().identity_index;
+            if (identity == STATIC_NONE ||
+                std::any_of(view.prepared.begin(), view.prepared.end(), [&](const auto& c) {
+                    return c.identity_index != identity;
+                }))
+                continue;
+            const auto& window = owner_->identities_[identity];
+            if (window.mode != IdentityRemapMode::RedirectBank || window.count > 64 ||
+                !window.stride || view.base < window.base)
+                continue;
+            const auto inner = (view.base - window.base) % window.stride;
+            const auto span = view.end - view.base;
+            if (span > window.stride - inner)
+                continue;
+            for (std::size_t id = 0; id < window.count; ++id) {
+                const auto base = window.base + id * window.stride + inner;
+                const auto it =
+                    std::lower_bound(entity_views_.begin(),
+                                     entity_views_.end(),
+                                     base,
+                                     [](const EntityView& candidate, std::uint64_t address) {
+                                         return candidate.base < address;
+                                     });
+                if (it == entity_views_.end() || it->base != base || it->end - base != span ||
+                    it->layout != view.layout)
+                    continue;
+                // Any competing View or Reserve keeps the general decoder.
+                if ((it != entity_views_.begin() && (it - 1)->prefix_max_end > base) ||
+                    (it + 1 != entity_views_.end() && (it + 1)->base < it->end) ||
+                    std::any_of(reserves_.begin(), reserves_.end(), [&](const auto& r) {
+                        return r.base < it->end && r.end > base;
+                    }))
+                    continue;
+                if (view.identity_targets.empty())
+                    view.identity_targets.resize(window.count);
+                view.identity_targets[id] = &*it;
+            }
+        }
+        if (std::getenv("REGFW_ENTITY_HASH_STATS")) {
+            std::size_t slots = 0, usable = 0;
+            for (const auto& view : entity_views_) {
+                slots += view.identity_targets.size();
+                for (const auto* target : view.identity_targets)
+                    usable += target != nullptr;
+            }
+            std::fprintf(stderr,
+                         "ENTITY_REDIRECT_STATS slots=%zu usable=%zu bytes=%zu\n",
+                         slots,
+                         usable,
+                         slots * sizeof(const EntityView*));
         }
     }
     bool lookup_prepared(std::uint64_t word, PreparedHit& hit) const noexcept {
@@ -290,10 +393,10 @@ class FormulaDecoder {
                 break;
             if (word >= view.end)
                 continue;
-            const auto it = view.layout->words.find(word - view.base);
-            if (it == view.layout->words.end())
+            const auto* found = view.layout->find(word - view.base);
+            if (!found)
                 continue;
-            const auto& access = it->second;
+            const auto& access = *found;
             const auto& bound = view.prepared[access.ordinal];
             if (!winner || compare(bound.mount->scope, winner->scope) > 0) {
                 winner = bound.mount;
@@ -367,6 +470,8 @@ class FormulaDecoder {
                     std::uint32_t linear,
                     std::uint32_t byte,
                     const RegElementIndex* prepared_index = nullptr) const {
+        out.prepared_view = nullptr;
+        out.prepared_access = nullptr;
         const auto& winner = &mount;
         const auto& binding = bindings_[winner->binding];
         const auto& scope = scopes_[winner->scope];
@@ -403,8 +508,11 @@ class FormulaDecoder {
             out.identity_index = index;
             const auto& window = owner_->identities_[index];
             const auto offset = word - window.base;
-            out.identity_request = static_cast<std::uint32_t>(offset / window.stride);
-            out.identity_inner = offset % window.stride;
+            const auto stride = window.stride;
+            const auto request = offset / stride;
+            const auto inner = offset % stride;
+            out.identity_request = static_cast<std::uint32_t>(request);
+            out.identity_inner = inner;
             out.execute = &RegisterMap::resolve_plan<2>;
         } else
             out.execute = &RegisterMap::resolve_plan<1>;
@@ -427,6 +535,8 @@ class FormulaDecoder {
     // already bound when the View was installed.
     void
     fill_prepared(const PreparedHit& hit, std::uint64_t word, RegisterMap::AliasEntry& out) const {
+        out.prepared_view = hit.view;
+        out.prepared_access = hit.access;
         const auto& info = *hit.access;
         const auto& bound = *hit.context;
         const auto& mount = *bound.mount;
@@ -458,8 +568,11 @@ class FormulaDecoder {
             out.identity_index = index;
             const auto& window = owner_->identities_[index];
             const auto offset = word - window.base;
-            out.identity_request = static_cast<std::uint32_t>(offset / window.stride);
-            out.identity_inner = offset % window.stride;
+            const auto stride = window.stride;
+            const auto request = offset / stride;
+            const auto inner = offset % stride;
+            out.identity_request = static_cast<std::uint32_t>(request);
+            out.identity_inner = inner;
             out.execute = &RegisterMap::resolve_plan<2>;
         } else
             out.execute = &RegisterMap::resolve_plan<1>;
@@ -498,6 +611,7 @@ class FormulaDecoder {
     // Binding-level execution traits are snapshotted in the same pass: the
     // hot path then selects its route without chasing the node pointer.
     void prepare_fast_paths() {
+        prepare_identity_targets();
         for (auto& b : bindings_) {
             const auto& n = *b.node;
             b.writable_mask = static_cast<std::uint32_t>(n.writable_mask);
@@ -566,6 +680,23 @@ class FormulaDecoder {
         fill_prepared(hit, word, out);
         return &out;
     }
+    const RegisterMap::AliasEntry* redirect(const RegisterMap::AliasEntry& source,
+                                            std::uint32_t id,
+                                            std::uint64_t address,
+                                            RegisterMap::AliasEntry& out) const {
+        if (source.prepared_view && source.prepared_access) {
+            const auto& view = *static_cast<const EntityView*>(source.prepared_view);
+            if (id < view.identity_targets.size())
+                if (const auto* target = view.identity_targets[id]) {
+                    const auto* access =
+                        static_cast<const PreparedAccessInfo*>(source.prepared_access);
+                    fill_prepared(
+                        {target, &target->prepared[access->ordinal], access}, address, out);
+                    return &out;
+                }
+        }
+        return decode(address, out);
+    }
     // Geometry and direction eligibility are prepared once per mount at
     // finish. The hot path supplies only the element, live hooks/callbacks,
     // and diagnostic context when it is actually needed.
@@ -632,11 +763,19 @@ void FormulaDecoder::for_each_word(F f) const {
     std::vector<std::uint64_t> addresses;
     RegisterMap::AliasEntry entry;
     // Diagnostic/reporting enumeration only, never on MMIO hot path.
-    for (const auto& view : entity_views_)
-        for (const auto& [local, access] : view.layout->words) {
-            (void)access;
-            addresses.push_back(view.base + local);
+    for (const auto& view : entity_views_) {
+        const auto& layout = *view.layout;
+        if (!layout.dense.empty()) {
+            for (std::size_t i = 0; i < layout.dense.size(); ++i)
+                if (layout.dense[i].ordinal != STATIC_NONE)
+                    addresses.push_back(view.base + layout.dense_base + i * 4);
+        } else {
+            for (const auto& [local, access] : layout.words) {
+                (void)access;
+                addresses.push_back(view.base + local);
+            }
         }
+    }
     std::sort(addresses.begin(), addresses.end());
     addresses.erase(std::unique(addresses.begin(), addresses.end()), addresses.end());
     for (const auto address : addresses)
