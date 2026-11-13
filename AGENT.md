@@ -21,7 +21,11 @@
 
 代码导航见 [模块架构](docs/Architecture.zh-CN.md) 和 [私有实现目录](src/README.md)。`include/regfw/` 是稳定公开入口，`src/internal/` 不对外安装。基线 0.37.0 只做结构整理；0.38.0 新增上文说明的异步扩展。
 
-当前生产后端是 **View Range → Shared EntityLayout Hash → Prepared AccessInfo → Existing Access Engine**。`REG_LAYOUT` 接口、REG DSL、MMIO、Resolver/PreAccess、Transaction、Callbacks、Snapshot、Reset 均保持原有行为。运行时的几何计划仅构建一次（按布局类型的函数局部静态对象）；每个 Bank 安装独立的 Entity storage 与访问上下文，共享 View 内地址映射形状。
+当前生产后端是 **View Range → Shared EntityLayout Dense/Hash → Prepared AccessInfo → Existing Access Engine**。`REG_LAYOUT` 接口、REG DSL、MMIO、Resolver/PreAccess、Transaction、Callbacks、Snapshot、Reset 均保持原有行为。运行时的几何计划仅构建一次（按布局类型的函数局部静态对象）；每个 Bank 安装独立的 Entity storage 与访问上下文，共享 View 内地址映射形状。
+
+当前 MMIO 优化补丁允许全局 / View pre_access 复用 scalar / mapped scalar 执行器；空全局钩子不再强制通用路径。测试通用路径时使用已安装、未 finish 的 Bank。钩子复用 EventCallback 的 full/frame 入口，两个入口共享同一个可变闭包；保留 PreAccessGuard 的换绑/退休生命周期。完整 info 与按值复制仍有效，日志、resolver、钩子函数仍逐拍读取，不缓存解析结果。固定标量方向资格在 finish 写入每挂载的 prepared context。保持 admission 检查；有 deferred_writes 的端点仍走通用准入路径。详见 [MMIO 钩子性能](docs/Performance-Hooks.md)。 identity 已解析后，原生 32-bit RW 若没有 index、钩子、当前方向事件/读完成事件或 logger，且权限允许，可直接访问存储而不装配回调上下文；条件必须在 resolver 返回后读取，保留本次调用中动态绑定的即时效果。
+
+局部密集地址采用有界连续表，稀疏地址保留 Hash；两者在安装时构建，同构 View/VF 共享几何，真实存储和回调槽按实例绑定。查找包络只覆盖已挂载 REG。finish 可为同构、无竞争 View/Reserve 的 identity 目标建立不变的 View 指针表，复用寄存器位置而免除二次查找；不满足条件时完整解码。resolver 返回值和动态绑定不缓存，不做逐 word consteval。测量、编译成本与限制见 [分发查表报告](docs/Performance-Dispatch.md)。
 
 已移除完整布局的 `consteval` 两遍 FormulaPlan、编译期稀疏元素排序以及旧 Zone/Run/PageDirectory 查找。构建期只保留单个声明类型的宽度、dims、strides 等轻量 constexpr 信息。不要重新引入逐 word `consteval` 输出或多级缓存。
 

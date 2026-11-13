@@ -1,4 +1,47 @@
-# regfw 0.36.0 性能复测入口
+# regfw 性能复测入口
+
+## pre_access / 地址分发对照
+
+本文钩子优化报告以无异步的 `cec42e1f3a25bd8804129ff4c349a0dd54128742`（0.37.0）及回移同一优化的版本配对；PR 集成 main 0.38.0。复现时不要混用这两套版本。
+
+`mmio.cpp` 支持 `REGFW_BENCH_PRE_ACCESS=none|global|view|both`。钩子执行可观察的计数操作；三个手写参照均先执行钩子，再做地址解码与 switch 分发。`switch_raw` / `switch_normalized` 保留简单解码参照；`range_switch` 使用 if/else 范围链再进入 1000-case switch，`REGFW_BENCH_RANGES=1|10|100` 选择每个寄存器区的范围数（混合布局另外经过 8 个 VF 范围）。编译器可以正常优化范围链。正确性对照检查有效 1/2/4 字节访问的寄存器值、读响应、回调效果和钩子次数。分别编译两个版本时必须使用**同一份新的 mmio.cpp**，各自配套版本的头文件和库，保持优化等级一致。
+
+手写参照的 pre_access 位于解码之前；regfw 沿用有效解析后的钩子语义。本基准只测有效请求，不能用于证明非法/被拒绝访问的钩子时序一致。没有运行真实 QEMU dispatch，也没有假定这些合成范围等于某个设备的实际范围分布。
+
+```sh
+# 两个版本先按相同 Release 配置构建 libregfw.a。
+# 例如用新的基准源文件链接旧版库：
+g++ -O3 -DNDEBUG -std=c++20 -fno-strict-aliasing \
+  -I"$OLD/include" -I"$OLD/third_party/hlog/include" \
+  "$NEW/benchmarks/mmio.cpp" "$OLD_BUILD/libregfw.a" \
+  -L"$OLD/third_party/hlog/lib" -Wl,-rpath,"$OLD/third_party/hlog/lib" \
+  -lhlog -pthread -o "$RESULTS/baseline"
+
+# candidate 也用同一份新 mmio.cpp 链接配套候选库；若候选已有新基准源文件，
+# 可使用 REGFW_BUILD_BENCHMARKS=ON 的 bench_mmio_dynamic。
+python3 benchmarks/measure_hooks.py \
+  --baseline "$RESULTS/baseline" --candidate "$NEW_BUILD/bench_mmio_dynamic" \
+  --out "$RESULTS/hooks" --blocks 3 --passes 5
+```
+
+输出目录须为空且放在 SDK 之外。Linux/glibc，固定 CPU、随机场景顺序、版本交替；每进程先启动/退出一个线程以使用多线程引用计数路径，访问本身串行。96 场景涵盖四种钩子组合、普通/30% 映射/纯映射、有无寄存器回调、读写、未绑定 logger/INFO logger。输出环境与二进制摘要、原始采样和汇总；不会把微基准结果当成真实 QEMU 整机收益。
+
+拆分 identity / 单下标 converter 时，将 `mmio.cpp` 分别以 `-DREGFW_BENCH_SINGLE_LAYOUT=1 -DREGFW_BENCH_IDENTITY=0或1 -DREGFW_BENCH_INDEX=0或1` 编译，生成 `baseline-0-0`、`baseline-0-1`、`baseline-1-0`、`baseline-1-1`，候选版本同样生成四个二进制。关闭功能会从声明/布局中移除对应映射，不是绑定一个返回原值的 resolver。固定 8 VF 布局和同一随机地址流，手写参照也关闭相同功能：
+
+```sh
+python3 benchmarks/measure_routes.py --baseline-prefix "$RESULTS/baseline" \
+  --candidate-prefix "$RESULTS/candidate" --out "$RESULTS/routes"
+```
+
+默认测量包含 24 个场景：四种映射组合的无钩子/全局钩子读写（10 范围），以及双映射下的 1/100 范围敏感性对照。CPU/引用计数/进程配对规则与 `measure_hooks.py` 相同。不同功能组合的差额包含执行路径变化，不能当作严格可相加的单个函数耗时。可用 `--pairs 1-0 1-1 --ranges 10` 仅测 identity-only / 双转换的 8 个场景；两种 prefix 指向同一组二进制即可做 A/A 对照。
+
+## 分发查表与采样
+
+查表优化、剩余差距定位及编译成本见 [Performance-Dispatch.md](../docs/Performance-Dispatch.md)。`measure_routes.py --ranges 10` 测全部四种转换组合的 16 个读写/hook 场景。
+
+Linux x86-64 可把 `sample_ips.cpp` 链接进单布局基准，并用 `-no-pie` 生成诊断二进制。设置 `REGFW_SAMPLE_IPS=/absolute/samples.txt` 后收集 IP，使用 `python3 benchmarks/summarize_ips.py BINARY SAMPLES` 按符号汇总。采样运行会扰动时序，正式性能比较不链接/启用它。
+
+## 历史完整复测入口
 
 ```bash
 make -f build.mk bench BUILD=build-bench JOBS=2

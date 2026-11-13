@@ -199,12 +199,115 @@ void scope_depth_priority() {
     CHECK(map.mmio_read(0) == 0x77);
 }
 
+REG_ACCESS_FIELD(TableRoute, std::uint32_t);
+REG_ACCESS_FIELD(TableLogical, std::uint32_t);
+REG_ACCESS_FIELD(TablePhysical, std::uint32_t);
+REG_PRE_ACCESS(TableCheck);
+struct RoutedTable : reg::RegEntityBundle {
+    REG_BUNDLE(RoutedTable);
+    REG(DATA,
+        std::uint32_t,
+        reg::at(0x40).array(reg::dims(4, 32), reg::strides(0xa0, 4)).mask(0x00ff00ff));
+    REG_ACCESS_GROUP(
+        INDEX,
+        .members = {DATA},
+        .coordinates = {{TableLogical, 1}},
+        .derive = {reg::map_index(TableLogical, TablePhysical).using_resolver(TablePhysical)});
+};
+template <bool Overlay>
+struct RoutedLayout : reg::Bundle {
+    REG_BUNDLE(RoutedLayout);
+    REG_REPEAT_ENTITY(vf, RoutedTable, 3);
+    REG_ENTITY(overlay, Inner);
+    REG_LAYOUT([&] {
+        auto root = reg::view("ROUTES", 0x2000)
+                        .map_repeat("VF", 0, reg::repeat(3).stride(0x600), [&](auto i) {
+                            auto v = reg::view("VF_REGS", 0x600)
+                                         .map(vf[i])
+                                         .identity(19)
+                                         .using_resolver(TableRoute)
+                                         .using_pre_access(TableCheck);
+                            return v;
+                        });
+        if constexpr (Overlay)
+            root = root.map(reg::view("OVERLAY", 4).map(overlay), 0x650, 10)
+                       .map(reg::view("RESERVED", 4).reserve(0, 4), 0xc54, 10);
+        return reg::address_space("TABLE_ROUTE")
+            .map(root, 0xc100000000ULL)
+            .map(root, 0xff7100000000ULL)
+            .map(root.read_only_ignore_writes(), 0xc200000000ULL);
+    });
+};
+template <bool Overlay>
+void routed_tables() {
+    reg::RegisterBank<RoutedLayout<Overlay>> fast(reg::space().name("TABLE_ROUTE"));
+    reg::RegisterBank<RoutedLayout<Overlay>> generic(reg::space().name("TABLE_ROUTE"));
+    unsigned shift = 1, fast_hooks = 0, generic_hooks = 0;
+    reg::RegAccessInfo fast_info, generic_info;
+    auto bind = [&](auto& bank, unsigned& hooks, reg::RegAccessInfo& saved) {
+        bank.map().set_identity_resolver(TableRoute, [&](const auto& r) {
+            return (r.request_id + shift) % 3;
+        });
+        bank.map().set_access_resolver(TablePhysical, [&](const reg::RegAccessInfo& i) {
+            return (i.index_as(TableLogical) + shift) % 32;
+        });
+        bank.map().set_pre_access(TableCheck, [&hooks, &saved](const reg::RegAccessInfo& i) {
+            ++hooks;
+            saved = i;
+        });
+    };
+    bind(fast, fast_hooks, fast_info);
+    bind(generic, generic_hooks, generic_info);
+    fast.finish();
+    // Independent expectations cover dense-table holes and trimmed bounds.
+    for (auto* bank : {&fast, &generic}) {
+        const auto base = 0xc100000000ULL;
+        CHECK(bank->map().mmio_write(base + 0x40, 0x12345678).success());
+        CHECK((*bank)->vf[1].DATA.at(0, 1) == 0x00340078);
+        CHECK(bank->map().mmio_read(base + 0x40) == 0x00340078);
+        for (const auto hole : {0x30u, 0xc0u, 0x2a0u})
+            CHECK(bank->map().try_mmio_read_sized(base + hole, 4).result ==
+                  reg::RegMemTxResult::DecodeError);
+        CHECK(bank->map().mmio_write(0xc200000040ULL, 0).result == reg::RegMemTxResult::Ignored);
+        CHECK((*bank)->vf[1].DATA.at(0, 1) == 0x00340078);
+    }
+    // The generic bank keeps the full resolver/permission/overlay decoder.
+    for (shift = 0; shift < 3; ++shift)
+        for (const auto base : {0xc100000000ULL, 0xff7100000000ULL, 0xc200000000ULL})
+            for (unsigned vf = 0; vf < 3; ++vf)
+                for (unsigned offset = 0; offset < 0x300; offset += 4) {
+                    const auto address = base + vf * 0x600 + offset;
+                    const auto data = 0x12340000u + offset + vf;
+                    auto a = fast.map().mmio_write(address, data);
+                    auto b = generic.map().mmio_write(address, data);
+                    CHECK(a.result == b.result);
+                    auto x = fast.map().try_mmio_read_sized(address, 4);
+                    auto y = generic.map().try_mmio_read_sized(address, 4);
+                    CHECK(x.result == y.result && x.value == y.value);
+                    CHECK(fast_hooks == generic_hooks);
+                    if (fast_hooks) {
+                        CHECK(fast_info.address == generic_info.address &&
+                              fast_info.resolved_address == generic_info.resolved_address &&
+                              fast_info.request_id() == generic_info.request_id() &&
+                              fast_info.resolved_id() == generic_info.resolved_id() &&
+                              fast_info.index.linear() == generic_info.index.linear() &&
+                              fast_info.index_as(TableLogical) ==
+                                  generic_info.index_as(TableLogical) &&
+                              fast_info.mapped_as(TablePhysical) ==
+                                  generic_info.mapped_as(TablePhysical));
+                    }
+                }
+    CHECK(fast.save() == generic.save());
+}
+
 } // namespace
 int main() try {
     exercise_geometry<DynLayout>();
     exercise_geometry<StaticLayout>();
     memo_dynamic_state();
     scope_depth_priority();
+    routed_tables<false>();
+    routed_tables<true>();
     std::cout
         << "PASS: fast-path caches under dynamic callbacks/borrow, unequal-depth scope priority, "
            "dynamic+static patterns (dense/strided/interleaved2/ladder/holes/wide)\n";

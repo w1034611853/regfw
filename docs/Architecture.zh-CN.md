@@ -8,7 +8,7 @@
 |---|---|---|
 | 寄存器声明与用户 DSL | `include/regfw/dsl.hpp`、`include/regfw/detail/declarations_base.hpp` | `REG`、Entity、Layout 声明与元数据 |
 | REG_LAYOUT / View 组合 | `include/regfw/static_layout.hpp`、`src/layout/address_view.cpp` | Layout Factory、View、Repeat、优先级与地址上下文 |
-| 公式与共享地址表 | `src/layout/formula.cpp`、`src/internal/formula_decoder.hpp` | 共享 EntityLayout Hash、局部地址到多维索引/字节偏移的定位 |
+| 公式与共享地址表 | `src/layout/formula.cpp`、`src/internal/formula_decoder.hpp` | 共享 EntityLayout 连续表/Hash、局部地址到多维索引/字节偏移的定位 |
 | 访问入口 / 控制流 | `src/runtime/access.cpp` | `try_mmio_{read,write}_sized`、权限、映射、事务和快速执行 |
 | 实体生命周期 | `src/runtime/lifecycle.cpp`、`src/runtime/bindings.cpp` | Entity Storage 初始化、注册、finalize、回调槽绑定 |
 | 寄存器行为 | `src/runtime/behaviors.cpp`、`include/regfw/behaviors.hpp` | 字段读写规则、掩码等 |
@@ -31,7 +31,7 @@ runtime/access.cpp  [read/write 总入口，DispatchGuard]
 View range / priority  [View 可能交叠；空洞透明，Reserve 阻断]
        |
        v
-EntityLayout Hash      [共享几何，局部地址 -> PreparedAccessInfo]
+EntityLayout Dense/Hash [共享几何，局部地址 -> PreparedAccessInfo]
        |
        v
 AccessContext          [绑定此 View 的真实 Entity/Storage、Scope、Identity]
@@ -45,13 +45,13 @@ Access Engine          [PreAccess / resolver / access group / 权限 / transacti
 
 * 一种 Entity 的不可变局部寄存器几何可被多个 View/VF 复用。不同 Entity 实例的存储和动态 Callback **不能共用**。
 * 多维坐标沿用 `RegElementIndex`，最高 `MAX_REG_DIMS`，不是固定 `index0/index1`。
-* 访问期需要用动态 Resolver 决定的映射依旧实时计算；不能把某次结果冻结到共享 Hash。
+* 访问期需要用动态 Resolver 决定的映射依旧实时计算；不能把某次结果冻结到共享地址表。
 * 访问不应重新运行整个 REG_LAYOUT 工厂；它只在第一次创建类型布局时按普通 C++ 流程生成一次。
 
 ## 初始化与运行时
 
 1. DSL 描述 Entity、REG、View、Repeat、Identity 的静态规则。
-2. 原生 C++ 构建小型布局描述，并构建按局部有效地址索引的共享 Hash；对大型宽寄存器需要按实际可访问字节构建记录。
+2. 原生 C++ 构建小型布局描述，并在安装时构建按局部有效地址索引的共享连续表/Hash；对大型宽寄存器需要按实际可访问字节构建记录。
 3. Bank 初始化时绑定存储、Scope、动态 Resolver/PreAccess/Callback 引用并执行合法性检查。
 4. MMIO 访问只做地址选择和访问执行；Storage、Callback、Transaction、Snapshot 的既有规则保持不变。
 
@@ -83,3 +83,5 @@ cmake --install build --prefix /tmp/regfw-install
 ```
 
 完整的命令与本次结果以根目录 `VALIDATION.md` 和交付报告为准。
+
+局部密集表和同构 identity 目标的直接绑定见 [分发查表报告](Performance-Dispatch.md)。这些索引只编码不变布局关系；回调、resolver 和权限语义继续由现有访问引擎执行。
