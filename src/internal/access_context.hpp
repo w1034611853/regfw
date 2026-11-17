@@ -20,6 +20,9 @@ struct RegisterMap::AliasEntry : detail::ScalarAccessSite {
     using Execute = Resolution& (
         RegisterMap::*)(std::uint64_t, unsigned, RegTransactionKind, RegData, const AliasEntry*);
     Execute execute{};
+    // Decoder-owned immutable geometry; no resolver result is cached.
+    const void* prepared_view{};
+    const void* prepared_access{};
     const AliasEntry* const* redirect_targets{};
     std::uint64_t identity_inner{};
     std::uint32_t identity_request{};

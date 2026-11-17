@@ -3,6 +3,7 @@
 #include "storage.hpp"
 #include "entity.hpp"
 #include "detail/static_plan.hpp"
+#include "detail/handle_lifetime.hpp"
 #include <hlog.h>
 #include <cassert>
 #include <cstddef>
@@ -281,6 +282,24 @@ template <class F>
 void invoke_common_event(void* target, const void*, const RegAccessInfo& info) {
     (*static_cast<F*>(target))(info);
 }
+template <class F>
+std::shared_ptr<const EventCallback> bind_pre_access(F f) {
+    // Full and scalar-frame entry points share one callable, including its
+    // mutable state. Materialize only the info fields used by this hook.
+    if constexpr (std::is_pointer_v<F> || std::same_as<F, std::nullptr_t>) {
+        // Preserve std::function's empty/null-target behavior: invocation
+        // throws and follows the normal hook-failure path.
+        return bind_pre_access(std::function<void(const RegAccessInfo&)>(std::move(f)));
+    } else {
+        return bind_event(std::move(f),
+                          invoke_common_event<F>,
+                          [](void* target, RegData, const ScalarAccessFrame& frame) {
+                              frame.with_info([&](const RegAccessInfo& info) {
+                                  std::invoke(*static_cast<F*>(target), info);
+                              });
+                          });
+    }
+}
 template <class Info, class F>
 void invoke_info_event(void* target, const void*, const RegAccessInfo& info) {
     std::invoke(*static_cast<F*>(target), Info(info));
@@ -341,7 +360,7 @@ namespace detail {
 void* checked_value_pointer(EntityState* node,
                             std::size_t index,
                             const void* token,
-                            const std::weak_ptr<void>& life,
+                            const detail::HandleLifetime& life,
                             std::size_t rank,
                             bool empty = false);
 void* checked_value_pointer(EntityState* node,
@@ -352,17 +371,35 @@ void* checked_value_pointer(EntityState* node,
                             bool empty = false);
 } // namespace detail
 namespace detail {
-// Common ownership bookkeeping is compiled once, including copy/move/dtor.
+// Selection is compiled once; cheap single-threaded lifetime copies stay inline.
 class HandleState {
   protected:
     EntityState* node_{};
     std::size_t index_{};
     std::size_t count_{};
-    std::weak_ptr<void> lifetime_;
-    void check() const;
+    HandleLifetime lifetime_;
+    const bool* borrowed_{};
+    std::weak_ptr<void> weak_lifetime() const;
+    HandleState(const HandleState& parent, std::size_t index, std::size_t count, TrustedAccessTag)
+        : node_(parent.node_), index_(index), count_(count), lifetime_(parent.lifetime_),
+          borrowed_(parent.borrowed_) {
+    }
+    [[noreturn]] static void expired_handle();
+    [[noreturn]] static void element_out_of_range();
+    [[noreturn]] void borrowed_handle() const;
+    void check() const {
+        if (!node_ || lifetime_.expired())
+            expired_handle();
+        if (*borrowed_)
+            borrowed_handle();
+    }
     EntityState* checked_node() const;
-    void* value_pointer(const void* token) const;
-    std::size_t checked_element(std::size_t index) const;
+    std::size_t checked_element(std::size_t index) const {
+        check();
+        if (index >= count_)
+            element_out_of_range();
+        return index_ + index;
+    }
     std::size_t checked_element(RegElementIndex index) const;
     std::size_t element_index(std::span<const std::size_t> coordinates) const;
     void ensure_source_available() const;
@@ -375,15 +412,15 @@ class HandleState {
     HandleState();
     HandleState(EntityState* node,
                 std::size_t index,
-                const std::weak_ptr<void>& life,
+                const detail::HandleLifetime& life,
                 std::size_t count = std::dynamic_extent);
     HandleState(EntityState* node,
                 std::size_t index,
                 const std::shared_ptr<void>& life,
                 std::size_t count = std::dynamic_extent);
-    HandleState(const HandleState&);
-    HandleState(HandleState&&) noexcept;
-    ~HandleState();
+    HandleState(const HandleState&) = default;
+    HandleState(HandleState&&) noexcept = default;
+    ~HandleState() = default;
     bool is_alive() const noexcept;
     std::size_t size() const;
     bool empty() const {
@@ -413,6 +450,7 @@ class RegView final
     friend struct detail::Access;
     friend class RegisterMap;
     friend class RegScope;
+    T* value_{};
     using DataType = std::conditional_t<detail::wide_value_v<T>, WideRegData, RegData>;
     using InfoType = std::conditional_t<detail::wide_value_v<T>,
                                         WideTypedRegAccessInfo<Rank>,
@@ -545,7 +583,8 @@ class RegView final
     T& ref() const
         requires(ValueAccess)
     {
-        return *static_cast<T*>(value_pointer(&detail::value_type_token<T>));
+        check();
+        return *value_;
     }
     operator T&() const
         requires(ValueAccess)
@@ -564,21 +603,36 @@ class RegView final
     }
 
   private:
+    template <class Lifetime>
     REGFW_DETAIL_ALWAYS_INLINE RegView(detail::EntityState* node,
                                        std::size_t index,
-                                       const std::weak_ptr<void>& life,
+                                       const Lifetime& life,
                                        std::size_t count = std::dynamic_extent)
-        : Members(static_cast<T*>(detail::checked_value_pointer(
-              node, index, &detail::value_type_token<T>, life, Rank, !ValueAccess && count == 0))),
-          detail::HandleState(node, index, life, count) {
+        : RegView(node,
+                  index,
+                  life,
+                  count,
+                  static_cast<T*>(detail::checked_value_pointer(node,
+                                                                index,
+                                                                &detail::value_type_token<T>,
+                                                                life,
+                                                                Rank,
+                                                                !ValueAccess && count == 0))) {
     }
-    REGFW_DETAIL_ALWAYS_INLINE RegView(detail::EntityState* node,
-                                       std::size_t index,
-                                       const std::shared_ptr<void>& life,
-                                       std::size_t count = std::dynamic_extent)
-        : Members(static_cast<T*>(detail::checked_value_pointer(
-              node, index, &detail::value_type_token<T>, life, Rank, !ValueAccess && count == 0))),
-          detail::HandleState(node, index, life, count) {
+    template <class Lifetime>
+    RegView(detail::EntityState* node,
+            std::size_t index,
+            const Lifetime& life,
+            std::size_t count,
+            T* value)
+        : Members(value), detail::HandleState(node, index, life, count), value_(value) {
+    }
+    RegView(const detail::HandleState& parent, std::size_t index, T* value, std::size_t count)
+        : Members(value), detail::HandleState(parent, index, count, detail::TrustedAccessTag{}),
+          value_(value) {
+    }
+    auto element_view(std::size_t index) const {
+        return RegView<T, Rank, true>(*this, index, value_ + (index - index_), 1);
     }
     detail::EntityState* node() const {
         check();
@@ -587,17 +641,20 @@ class RegView final
 
   public:
     auto at_element(std::size_t i) const {
-        return RegView<T, Rank, true>(node_, checked_element(i), lifetime_, 1);
+        return element_view(checked_element(i));
     }
     auto at_element(TypedRegElementIndex<Rank> i) const {
-        return RegView<T, Rank, true>(node_, checked_element(i.raw()), lifetime_, 1);
+        return element_view(checked_element(i.raw()));
     }
     template <class... I>
     auto at(I... indices) const
         requires((std::integral<I> && ...) && (sizeof...(I) == Rank))
     {
         std::array<std::size_t, sizeof...(I)> coordinates{static_cast<std::size_t>(indices)...};
-        return RegView<T, Rank, true>(node_, element_index(coordinates), lifetime_, 1);
+        if constexpr (Rank == 1)
+            return element_view(checked_element(coordinates[0]));
+        else
+            return element_view(element_index(coordinates));
     }
     auto subspan(std::size_t offset, std::size_t count = std::dynamic_extent) const
         requires(Rank == 1)
@@ -610,16 +667,15 @@ class RegView final
         check();
         if (offset > count_ || (count != std::dynamic_extent && count > count_ - offset))
             throw Error("register subspan out of range", ErrorKind::Access);
-        return RegView<T, 1, false>(node_,
-                                    index_ + offset,
-                                    lifetime_,
-                                    count == std::dynamic_extent ? count_ - offset : count);
+        const auto extent = count == std::dynamic_extent ? count_ - offset : count;
+        return RegView<T, 1, false>(
+            *this, index_ + offset, extent ? value_ + offset : nullptr, extent);
     }
     T* data() const {
         if (!node_)
             return nullptr;
         check();
-        return count_ ? static_cast<T*>(value_pointer(&detail::value_type_token<T>)) : nullptr;
+        return count_ ? value_ : nullptr;
     }
     std::size_t size_bytes() const {
         return size() * sizeof(T);
@@ -669,7 +725,7 @@ struct Access {
     }
     template <class T, std::size_t R, bool V>
     static std::weak_ptr<void> lifetime(const RegView<T, R, V>& handle) {
-        return handle.lifetime_;
+        return handle.weak_lifetime();
     }
     static std::size_t storage_bytes(const EntityState* node);
     static WideRegData read_wide(const EntityState* node, std::size_t index);
@@ -766,7 +822,7 @@ RegData checked_access_result(R result) {
 namespace detail {
 struct ViewPreAccessChain;
 struct PreAccessSlot {
-    using Function = std::function<void(const RegAccessInfo&)>;
+    using Function = EventCallback;
     std::string name;
     std::shared_ptr<const Function> callback;
     CallbackDescription description;
@@ -866,7 +922,7 @@ class RegisterMap {
     static std::uint64_t checked_map_size(std::uint64_t size);
     void require_initialized() const;
     using IdentityFn = std::function<std::uint32_t(const IdentityResolveRequest&)>;
-    using PreFn = std::function<void(const RegAccessInfo&)>;
+    using PreFn = detail::PreAccessSlot::Function;
     std::shared_ptr<const IdentityFn> identity_resolver_;
     detail::CallbackDescription identity_description_;
     bool identity_deferred_{};
@@ -954,6 +1010,8 @@ class RegisterMap {
     void derive(Resolution& r);
     std::optional<RegMemTxResult> prepare(Resolution& r);
     bool pre(Resolution& r);
+    template <class Context>
+    bool pre(const Node& node, const detail::ViewPreAccessChain* chain, const Context& context);
     bool access_log_enabled(const Node&) const noexcept;
     void
     access_log(const Resolution& r, RegData value, std::string_view action = {}) const noexcept;
@@ -1017,6 +1075,7 @@ class RegisterMap {
     bool is_finalized() const;
 
   private:
+    friend class detail::HandleState;
     std::weak_ptr<void> lifetime() const;
     std::unique_ptr<Node> configure_node(std::string name,
                                          const detail::RegisterConfig& spec,
@@ -1221,7 +1280,7 @@ class RegisterMap {
     }
     template <class F>
     void set_pre_access(F f) {
-        bind_pre_access(std::make_shared<const PreFn>(std::move(f)));
+        bind_pre_access(detail::bind_pre_access(std::move(f)));
     }
     template <class Tag, class F>
     void set_pre_access(PreAccessKey<Tag> key,
@@ -1238,7 +1297,7 @@ class RegisterMap {
                       "pre_access must return void");
         bind_view_pre_access(key.id(),
                              key.name,
-                             std::make_shared<const PreFn>(std::move(f)),
+                             detail::bind_pre_access(std::move(f)),
                              detail::callback_description<F>(name, at));
     }
     template <class Tag>

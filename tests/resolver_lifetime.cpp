@@ -119,7 +119,10 @@ void exercise(unsigned width, bool forced_generic, bool throwing) {
         ++reads;
         return value;
     });
-    b.finish();
+    // Do not use a global hook as a proxy for the generic engine: hooks can
+    // now use the scalar executor too.
+    if (!forced_generic)
+        b.finish();
     auto result = m.mmio_write_sized(0, 37, width);
     CHECK(result.result == (throwing ? reg::RegMemTxResult::DeviceError : reg::RegMemTxResult::Ok));
     CHECK(identity_weak.expired() && index_weak.expired() && index_calls == 1 &&

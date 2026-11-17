@@ -19,6 +19,18 @@ struct Business : reg::RegEntityBundle {
     REG(VALUE, std::uint32_t, reg::at(0));
     REG(ITEMS, std::uint32_t, reg::at(0x10).array(reg::dims(6), reg::strides(8)));
 };
+union NativeCounter {
+    std::uint32_t u32;
+    struct {
+        std::uint32_t count : 24;
+        std::uint32_t flags : 8;
+    } bits;
+};
+struct NativeArrays : reg::RegEntityBundle {
+    REG_BUNDLE(NativeArrays);
+    REG(ITEMS, NativeCounter, reg::at(0).array(reg::dims(6), reg::strides(8)));
+    REG(GRID, NativeCounter, reg::at(0x40).array(reg::dims(2, 3), reg::strides(32, 8)));
+};
 struct Window : reg::RegViewBundle {
     REG_BUNDLE(Window);
 };
@@ -179,6 +191,64 @@ void span_bounds_and_lifetime() {
         },
         reg::ErrorKind::Device);
 }
+void native_element_views() {
+    using Element = reg::RegView<NativeCounter>;
+    std::optional<Element> saved;
+    {
+        reg::RegisterBank<NativeArrays> bank(reg::space(0x100).name("NATIVE"));
+        auto& items = bank->ITEMS;
+        auto slice = items.subspan(1, 4).subspan(1, 2);
+        saved.emplace(slice.at(1));
+        saved->bits.count = 31;
+        CHECK(items.at(3).ref().u32 == 31);
+        auto copied = *saved;
+        auto moved = std::move(copied);
+        CHECK(!copied.is_alive());
+        moved.bits.flags = 7;
+        CHECK(items.at_element(3).u32 == (7u << 24 | 31));
+        moved = items.at(0);
+        moved.u32 = 17;
+        CHECK(items.data()[0].u32 == 17 && saved->bits.count == 31);
+        auto grid_element = bank->GRID.at(1, 2);
+        grid_element.bits.count = 42;
+        CHECK(bank->GRID.at_element(5).ref().u32 == 42);
+        CHECK(bank.map().mmio_read(0x40 + 32 + 16) == 42);
+        fails(
+            [&] {
+                (void)bank->GRID.at(2, 0);
+            },
+            reg::ErrorKind::Access);
+        fails(
+            [&] {
+                (void)bank->GRID.at(0, 3);
+            },
+            reg::ErrorKind::Access);
+        fails(
+            [&] {
+                (void)items.at(-1);
+            },
+            reg::ErrorKind::Access);
+        auto empty = slice.subspan(2).subspan(0);
+        CHECK(empty.data() == nullptr && empty.size() == 0);
+        auto other_bank = std::move(bank);
+        CHECK(saved->is_alive());
+    }
+    CHECK(!saved->is_alive());
+    fails(
+        [&] {
+            (void)saved->ref();
+        },
+        reg::ErrorKind::Device);
+    fails(
+        [&] {
+            (void)saved->at(0);
+        },
+        reg::ErrorKind::Device);
+    // An expired handle remains safely copyable and destructible.
+    auto expired_copy = *saved;
+    saved.reset();
+    CHECK(!expired_copy.is_alive());
+}
 struct BadView : reg::RegViewBundle {
     REG_BUNDLE(BadView);
     REG(ACCIDENTAL_STORAGE, std::uint32_t, reg::at(0));
@@ -219,6 +289,7 @@ void invalid_views() {
 int main() try {
     automatic_ownership_and_mapping();
     span_bounds_and_lifetime();
+    native_element_views();
     invalid_views();
     std::cout << "PASS: automatic RegEntity/RegView ownership, repeat/shared routing, permissions, "
                  "commands, snapshots, reset, bounded slices and lifetime checks\n";

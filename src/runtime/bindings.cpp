@@ -262,39 +262,6 @@ std::string join_name(std::string_view prefix, std::string_view name) {
         return std::string(prefix);
     return std::string(prefix) + '.' + std::string(name);
 }
-void* HandleState::value_pointer(const void* token) const {
-    check();
-    return node_->value_pointer(index_, token);
-}
-std::size_t HandleState::checked_element(std::size_t i) const {
-    check();
-    if (i >= count_)
-        throw Error("register view element out of range", ErrorKind::Access);
-    return index_ + i;
-}
-std::size_t HandleState::checked_element(RegElementIndex index) const {
-    check();
-    if (index.linear() < index_ || index.linear() - index_ >= count_ ||
-        node_->layout().elements[index.linear()].index != index)
-        throw Error("element does not match register shape", ErrorKind::Access);
-    return index.linear();
-}
-std::size_t HandleState::element_index(std::span<const std::size_t> coordinates) const {
-    check();
-    std::size_t linear = 0;
-    if (coordinates.size() != node_->dims.size())
-        throw Error("typed handle rank mismatch");
-    if (coordinates.size() == 1)
-        return checked_element(coordinates[0]);
-    for (std::size_t d = 0; d < coordinates.size(); ++d) {
-        if (coordinates[d] >= node_->dims[d])
-            throw Error("array coordinate out of range", ErrorKind::Access);
-        linear = linear * node_->dims[d] + coordinates[d];
-    }
-    if (linear < index_ || linear - index_ >= count_)
-        throw Error("coordinate outside register view", ErrorKind::Access);
-    return linear;
-}
 void HandleState::ensure_source_available() const {
     auto* n = checked_node();
     if (n->read_callback || (n->wide && n->wide->wide_read_callback))

@@ -19,7 +19,7 @@ void RegisterMap::init(std::uint64_t size, std::string name, HLogLogger* logger)
     const auto checked_size = checked_map_size(size);
     detail::SparseLookup<Entry> next_lookup(checked_size);
     detail::SparseLookup<AliasEntry> next_aliases(checked_size);
-    auto next_life = std::make_shared<int>(0);
+    auto next_life = detail::make_handle_lifetime();
     auto next_resolvers = std::make_unique<ResolverRegistry>();
     auto next_scratch = std::make_unique<AccessScratch>();
     // Complete every allocation before publishing any initialized state.
@@ -136,7 +136,7 @@ void* EntityState::value_pointer(std::size_t index, const void* token) const {
 void* checked_value_pointer(EntityState* node,
                             std::size_t index,
                             const void* token,
-                            const std::weak_ptr<void>& life,
+                            const HandleLifetime& life,
                             std::size_t rank,
                             bool empty) {
     if (!node || life.expired())

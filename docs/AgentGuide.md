@@ -78,6 +78,8 @@
 
 `bank->xxx` / `(*bank).xxx` 取得 bundle 成员；`bank.map()` 取得 map。`reg::space(size).name(name).root(root_name).logger(logger).reset_scope(scope)` 设置构建参数。`.finalize()` 可以在构建时直接 finish，但有必需 resolver 时通常不适合，因为还来不及绑定。
 
+此 0.37 优化分支专用于单线程设备：view 的创建、复制、销毁、访问与 Bank 生命周期必须串行执行。RegView 的原子弱引用改为普通引用计数；不支持在多个线程中独立复制/销毁同一 Bank 的句柄。无需更改 `.at()`、`.ref()`、`.bits` 或回调 API，升级时必须一起重编译头文件和库。性能与集成说明见 [Performance-Handles](Performance-Handles.md)。
+
 bank 移动时底层对象地址保持稳定；现有 view 和 C bridge 仍指向同一底层对象。`bank.clear()` / 销毁会使 view 失效，受检访问会抛异常；之前取得的原生引用/指针仍遵循 C++ 生命周期规则，不能指望框架保护悬空引用。lambda 捕获的设备、FIFO、logger 必须活得足够久；临时 `info` 和其中的引用不能保留到异步任务。
 
 ## 3. 完整示例 A：最小布局、普通回调、内部访问

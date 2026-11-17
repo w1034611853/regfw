@@ -9,9 +9,10 @@ namespace detail {
 HandleState::HandleState() = default;
 HandleState::HandleState(EntityState* node,
                          std::size_t index,
-                         const std::weak_ptr<void>& life,
+                         const HandleLifetime& life,
                          std::size_t count)
-    : node_(node), index_(index), lifetime_(life) {
+    : node_(node), index_(index), lifetime_(life),
+      borrowed_(node && !life.expired() ? &node->borrowed : nullptr) {
     check();
     if (index > node->element_count() ||
         (count != std::dynamic_extent && count > node->element_count() - index))
@@ -22,17 +23,51 @@ HandleState::HandleState(EntityState* node,
                          std::size_t index,
                          const std::shared_ptr<void>& life,
                          std::size_t count)
-    : HandleState(node, index, std::weak_ptr<void>(life), count) {
+    : HandleState(node, index, HandleLifetime(life), count) {
 }
-HandleState::HandleState(const HandleState&) = default;
-HandleState::HandleState(HandleState&&) noexcept = default;
-HandleState::~HandleState() = default;
+std::shared_ptr<void> make_handle_lifetime() {
+    return std::shared_ptr<void>(new HandleLifetimeState, [](void* value) {
+        auto* state = static_cast<HandleLifetimeState*>(value);
+        state->alive = false;
+        HandleLifetime::release(state);
+    });
+}
+std::weak_ptr<void> HandleState::weak_lifetime() const {
+    return is_alive() ? node_->owner->lifetime() : std::weak_ptr<void>{};
+}
 } // namespace detail
 namespace detail {
-void HandleState::check() const {
-    if (!node_ || lifetime_.expired())
-        throw Error("register handle outlived its map");
-    node_->check_borrow();
+void HandleState::expired_handle() {
+    throw Error("register handle outlived its map");
+}
+void HandleState::element_out_of_range() {
+    throw Error("register view element out of range", ErrorKind::Access);
+}
+void HandleState::borrowed_handle() const {
+    throw Error("reentrant register access from a behavior: " + node_->name);
+}
+std::size_t HandleState::checked_element(RegElementIndex index) const {
+    check();
+    if (index.linear() < index_ || index.linear() - index_ >= count_ ||
+        node_->layout().elements[index.linear()].index != index)
+        throw Error("element does not match register shape", ErrorKind::Access);
+    return index.linear();
+}
+std::size_t HandleState::element_index(std::span<const std::size_t> coordinates) const {
+    check();
+    std::size_t linear = 0;
+    if (coordinates.size() != node_->dims.size())
+        throw Error("typed handle rank mismatch");
+    if (coordinates.size() == 1)
+        return checked_element(coordinates[0]);
+    for (std::size_t d = 0; d < coordinates.size(); ++d) {
+        if (coordinates[d] >= node_->dims[d])
+            throw Error("array coordinate out of range", ErrorKind::Access);
+        linear = linear * node_->dims[d] + coordinates[d];
+    }
+    if (linear < index_ || linear - index_ >= count_)
+        throw Error("coordinate outside register view", ErrorKind::Access);
+    return linear;
 }
 EntityState* HandleState::checked_node() const {
     check();

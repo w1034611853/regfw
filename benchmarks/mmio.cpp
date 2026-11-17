@@ -20,11 +20,26 @@
 #ifndef REGFW_BENCH_MIXED
 #define REGFW_BENCH_MIXED 1
 #endif
+#ifndef REGFW_BENCH_IDENTITY
+#define REGFW_BENCH_IDENTITY 1
+#endif
+#ifndef REGFW_BENCH_INDEX
+#define REGFW_BENCH_INDEX 1
+#endif
 constexpr unsigned COUNT = 1000, DIRECT = 700, GROUPS = 30, INDICES = 10, VFS = 8;
 constexpr std::uint64_t A = 0xff71f0000000ULL, B = 0xc100000000ULL;
 constexpr std::uint64_t VF_BASE = 0x100000, VF_STRIDE = 0x10000, SPACE_SIZE = 0x180000;
 unsigned build_direct = COUNT;
 bool build_mixed = false;
+// Apply identical observable hook work to regfw and all switch references.
+// Read once before layout construction; each benchmark case is a new process.
+const std::string hook_mode =
+    std::getenv("REGFW_BENCH_PRE_ACCESS") ? std::getenv("REGFW_BENCH_PRE_ACCESS") : "none";
+const bool global_hook = hook_mode == "global" || hook_mode == "both";
+const bool view_hook = hook_mode == "view" || hook_mode == "both";
+const unsigned range_groups =
+    std::getenv("REGFW_BENCH_RANGES") ? std::stoul(std::getenv("REGFW_BENCH_RANGES")) : 10;
+REG_PRE_ACCESS(BenchCheck);
 constexpr std::array<unsigned, VFS> routes = {3, 7, 0, 6, 1, 5, 2, 4};
 struct Tables {
     std::array<unsigned, VFS> vf = routes;
@@ -36,8 +51,17 @@ struct Tables {
     }
 };
 struct Effects {
-    std::uint64_t reads = 0, writes = 0, hash = 0;
+    std::uint64_t reads = 0, writes = 0, hash = 0, hooks = 0;
 };
+NOINLINE void pre_effect(Effects& e) {
+    ++e.hooks;
+}
+inline void switch_pre(Effects& e) {
+    if (global_hook)
+        pre_effect(e);
+    if (view_hook)
+        pre_effect(e);
+}
 NOINLINE std::uint32_t read_effect(Effects& e, std::uint32_t value) {
     ++e.reads;
     e.hash += value;
@@ -64,14 +88,19 @@ struct Mapped : reg::RegEntityBundle {
     REG(TABLE,
         std::uint32_t,
         reg::at(0).array(reg::dims(GROUPS, INDICES), reg::strides(INDICES* Stride, Stride)));
+#if REGFW_BENCH_INDEX
 #ifdef REGFW_STATIC_BENCH
     REG_STATIC_INDEX(INDEX_MAP, TABLE, LogicalIndex, PhysicalIndex, 1);
 #else
     REG_ACCESS_GROUP(
         INDEX_MAP,
         .members = {TABLE},
-        .coordinates = {{LogicalIndex, 1}},
+        .coordinates = {{
+            LogicalIndex,
+            1
+        }},
         .derive = {reg::map_index(LogicalIndex, PhysicalIndex).using_resolver(PhysicalIndex)});
+#endif
 #endif
 };
 template <unsigned Stride>
@@ -88,13 +117,15 @@ struct Layout : reg::Bundle {
                                     [&](auto i) {
                                         return layout.view("CELL", Stride).map(layout.direct[i]);
                                     });
+        if (view_hook)
+            base = base.using_pre_access(BenchCheck);
         if constexpr (REGFW_BENCH_MIXED) {
             auto root =
                 base.map_repeat("VF", VF_BASE, reg::repeat(VFS).stride(VF_STRIDE), [&](auto i) {
-                    return layout.view("VF_REGS", VF_STRIDE)
-                        .identity(1)
-                        .using_resolver(VfRoute)
-                        .map(layout.vf[i]);
+                    auto view = layout.view("VF_REGS", VF_STRIDE).map(layout.vf[i]);
+                    if constexpr (REGFW_BENCH_IDENTITY)
+                        view = view.identity(1).using_resolver(VfRoute);
+                    return view;
                 });
             return layout.address_space("DEVICE").map(root, A).map(root, B);
         } else
@@ -107,12 +138,14 @@ struct Layout : reg::Bundle {
                 .map_repeat("DIRECT", 0, reg::repeat(build_direct).stride(Stride), [&](auto i) {
                     return reg::view("CELL", Stride).map(direct[i]);
                 });
+        if (view_hook)
+            root = root.using_pre_access(BenchCheck);
         if (build_mixed)
             root = root.map_repeat("VF", VF_BASE, reg::repeat(VFS).stride(VF_STRIDE), [&](auto i) {
-                return reg::view("VF_REGS", VF_STRIDE)
-                    .identity(1)
-                    .using_resolver(VfRoute)
-                    .map(vf[i]);
+                auto view = reg::view("VF_REGS", VF_STRIDE).map(vf[i]);
+                if constexpr (REGFW_BENCH_IDENTITY)
+                    view = view.identity(1).using_resolver(VfRoute);
+                return view;
             });
         return reg::address_space("DEVICE").map(root, A).map(root, B);
     });
@@ -143,6 +176,14 @@ struct Framework {
         }
         const auto t1 = thread_now();
         init_ns = (t1 - t0).count();
+        if (global_hook)
+            bank.map().set_pre_access([this](const reg::RegAccessInfo&) {
+                pre_effect(effects);
+            });
+        if (view_hook)
+            bank.map().set_pre_access(BenchCheck, [this](const reg::RegAccessInfo&) {
+                pre_effect(effects);
+            });
         bank.map().set_identity_resolver(VfRoute, [this](const auto& r) {
             if (r.request_id >= VFS)
                 throw std::runtime_error("VF range");
@@ -152,7 +193,8 @@ struct Framework {
             return p;
         });
         bank.map().set_access_resolver(PhysicalIndex, [this](const reg::RegAccessInfo& i) {
-            auto v = i.resolved_id(), q = i.index_as(LogicalIndex);
+            auto v = REGFW_BENCH_IDENTITY ? i.resolved_id() : i.request_id_or_instance().value();
+            auto q = i.index_as(LogicalIndex);
             if (v >= VFS || q >= INDICES)
                 throw std::runtime_error("index range");
             auto p = tables.index[v][q];
@@ -264,11 +306,11 @@ store_direct(Switch& s, unsigned n, unsigned lane, unsigned size, std::uint32_t 
 unsigned physical_slot(Switch& s, unsigned request, unsigned slot, unsigned& vf) {
     if (request >= VFS)
         throw std::runtime_error("VF range");
-    vf = s.tables.vf[request];
+    vf = REGFW_BENCH_IDENTITY ? s.tables.vf[request] : request;
     if (vf >= VFS)
         throw std::runtime_error("physical VF range");
     auto q = slot % INDICES;
-    auto p = s.tables.index[vf][q];
+    auto p = REGFW_BENCH_INDEX ? s.tables.index[vf][q] : q;
     if (p >= INDICES)
         throw std::runtime_error("physical index range");
     return (slot / INDICES) * INDICES + p;
@@ -331,12 +373,75 @@ bool decode(std::uint64_t a, unsigned size, std::uint64_t& key, unsigned& reques
         key = off;
     return true;
 }
-template <unsigned Stride, bool Mixed, bool Normalize>
+// Compile an if/else ladder over register ranges, then feed its decoded
+// index to the same 1000-case switch. Do not force a particular assembly:
+// the compiler is free to optimize this just as it would a hand-written handler.
+template <unsigned Stride, unsigned Count, unsigned Ranges, unsigned N = 0>
+bool range_index(std::uint64_t offset, std::uint64_t& index) {
+    if constexpr (N == Ranges) {
+        return false;
+    } else {
+        constexpr auto first = std::uint64_t(N) * Count / Ranges;
+        constexpr auto last = std::uint64_t(N + 1) * Count / Ranges;
+        if (offset >= first * Stride && offset < last * Stride) {
+            if (offset % Stride)
+                return false;
+            index = first + (offset - first * Stride) / Stride;
+            return true;
+        } else {
+            return range_index<Stride, Count, Ranges, N + 1>(offset, index);
+        }
+    }
+}
+template <unsigned Stride, unsigned Count>
+bool range_index(std::uint64_t offset, std::uint64_t& index) {
+    if (range_groups == 1)
+        return range_index<Stride, Count, 1>(offset, index);
+    if (range_groups == 10)
+        return range_index<Stride, Count, 10>(offset, index);
+    return range_index<Stride, Count, 100>(offset, index);
+}
+template <unsigned Stride, unsigned VF = 0>
+bool range_vf(std::uint64_t offset, unsigned& request, std::uint64_t& index) {
+    if constexpr (VF == VFS) {
+        return false;
+    } else {
+        constexpr auto base = VF_BASE + std::uint64_t(VF) * VF_STRIDE;
+        if (offset >= base && offset - base < VF_STRIDE) {
+            request = VF;
+            if (!range_index<Stride, GROUPS * INDICES>(offset - base, index))
+                return false;
+            index += DIRECT;
+            return true;
+        } else {
+            return range_vf<Stride, VF + 1>(offset, request, index);
+        }
+    }
+}
+template <unsigned Stride, bool Mixed>
+bool range_decode(
+    std::uint64_t a, unsigned size, std::uint64_t& key, unsigned& request, unsigned& lane) {
+    std::uint64_t offset;
+    if (!valid_size(a, size) || !offset_of(a, offset))
+        return false;
+    lane = offset % 4;
+    offset -= lane;
+    request = 0;
+    if constexpr (Mixed)
+        if (offset >= VF_BASE)
+            return range_vf<Stride>(offset, request, key);
+    return range_index < Stride, Mixed ? DIRECT : COUNT > (offset, key);
+}
+
+template <unsigned Stride, bool Mixed, bool Normalize, bool Ranges = false>
 NOINLINE std::uint32_t sw_read(void* p, std::uint64_t a, unsigned size) {
     auto& s = *static_cast<Switch*>(p);
+    switch_pre(s.effects);
     std::uint64_t key;
     unsigned request, lane;
-    if (!decode<Stride, Mixed, Normalize>(a, size, key, request, lane))
+    const bool found = Ranges ? range_decode<Stride, Mixed>(a, size, key, request, lane)
+                              : decode<Stride, Mixed, Normalize>(a, size, key, request, lane);
+    if (!found)
         return 0;
     switch (key) {
 #define CASE(N) case (Normalize ? std::uint64_t(N) : ((Mixed && N>=DIRECT)?VF_BASE+std::uint64_t(N-DIRECT)*Stride:std::uint64_t(N)*Stride)): if constexpr(Mixed && N>=DIRECT)return load_mapped(s,request,N-DIRECT,lane,size); \
@@ -347,12 +452,15 @@ NOINLINE std::uint32_t sw_read(void* p, std::uint64_t a, unsigned size) {
             return 0;
     }
 }
-template <unsigned Stride, bool Mixed, bool Normalize>
+template <unsigned Stride, bool Mixed, bool Normalize, bool Ranges = false>
 NOINLINE unsigned sw_write(void* p, std::uint64_t a, std::uint32_t value, unsigned size) {
     auto& s = *static_cast<Switch*>(p);
+    switch_pre(s.effects);
     std::uint64_t key;
     unsigned request, lane;
-    if (!decode<Stride, Mixed, Normalize>(a, size, key, request, lane))
+    const bool found = Ranges ? range_decode<Stride, Mixed>(a, size, key, request, lane)
+                              : decode<Stride, Mixed, Normalize>(a, size, key, request, lane);
+    if (!found)
         return 1;
     switch (key) {
 #define CASE(N) case (Normalize ? std::uint64_t(N) : ((Mixed && N>=DIRECT)?VF_BASE+std::uint64_t(N-DIRECT)*Stride:std::uint64_t(N)*Stride)): if constexpr(Mixed && N>=DIRECT)return store_mapped(s,request,N-DIRECT,lane,size,value); \
@@ -443,7 +551,7 @@ void same_storage(Framework<Stride>& f, const Switch& s, bool mixed) {
                     require(f.bank->vf[v].TABLE.at(g, q).ref() == s.mapped[v][g * INDICES + q],
                             "mapped storage differs");
     if (f.effects.reads != s.effects.reads || f.effects.writes != s.effects.writes ||
-        f.effects.hash != s.effects.hash) {
+        f.effects.hash != s.effects.hash || f.effects.hooks != s.effects.hooks) {
         std::cerr << "effects FW " << f.effects.reads << ' ' << f.effects.writes << ' '
                   << f.effects.hash << " SW " << s.effects.reads << ' ' << s.effects.writes << ' '
                   << s.effects.hash << '\n';
@@ -469,14 +577,18 @@ void run(bool callbacks, unsigned repeats) {
         return;
     }
     Framework<Stride> f(Stride, Mixed, callbacks);
-    Switch raw(callbacks), norm(callbacks);
-    std::array<Engine, 3> engines = {
+    Switch raw(callbacks), norm(callbacks), ranged(callbacks);
+    std::array<Engine, 4> engines = {
         Engine{"regfw", &f, fw_read<Stride>, fw_write<Stride>},
         Engine{"switch_raw", &raw, sw_read<Stride, Mixed, false>, sw_write<Stride, Mixed, false>},
         Engine{"switch_normalized",
                &norm,
                sw_read<Stride, Mixed, true>,
-               sw_write<Stride, Mixed, true>}};
+               sw_write<Stride, Mixed, true>},
+        Engine{"range_switch",
+               &ranged,
+               sw_read<Stride, Mixed, true, true>,
+               sw_write<Stride, Mixed, true, true>}};
     // Untimed correctness comparison includes lane merging and callback outputs.
     auto correctness = trace(Stride, Mixed, "random", 10000);
     for (unsigned i = 0; i < correctness.size(); ++i) {
@@ -486,15 +598,17 @@ void run(bool callbacks, unsigned repeats) {
         for (auto& e : engines)
             require(e.write(e.object, a.address, a.value, size) == 0, "valid write failed");
         auto expected = engines[0].read(engines[0].object, a.address, size);
-        for (unsigned j = 1; j < 3; ++j)
+        for (unsigned j = 1; j < engines.size(); ++j)
             require(engines[j].read(engines[j].object, a.address, size) == expected,
                     "read result differs");
     }
     same_storage(f, raw, Mixed);
     same_storage(f, norm, Mixed);
+    same_storage(f, ranged, Mixed);
     f.reset();
     raw.reset();
     norm.reset();
+    ranged.reset();
     if (!repeats) {
         std::cout << "VALIDATED " << Stride << ' ' << Mixed << ' ' << callbacks << '\n';
         return;
@@ -506,15 +620,15 @@ void run(bool callbacks, unsigned repeats) {
         for (bool writing : {false, true}) {
             if (writing != selected_writing)
                 continue;
-            std::array<std::vector<double>, 3> samples;
+            std::array<std::vector<double>, 4> samples;
             for (unsigned round = 0; round < 8; ++round)
-                for (unsigned step = 0; step < 3; ++step) {
-                    unsigned j = (round + step) % 3;
+                for (unsigned step = 0; step < engines.size(); ++step) {
+                    unsigned j = (round + step) % engines.size();
                     auto x = timed(engines[j], t, writing, repeats);
                     if (round)
                         samples[j].push_back(x);
                 }
-            for (unsigned j = 0; j < 3; ++j) {
+            for (unsigned j = 0; j < engines.size(); ++j) {
                 auto x = samples[j];
                 std::sort(x.begin(), x.end());
                 std::cout << "RESULT " << Stride << ' ' << (Mixed ? "mixed30" : "plain") << ' '
@@ -529,9 +643,18 @@ void run(bool callbacks, unsigned repeats) {
     }
     same_storage(f, raw, Mixed);
     same_storage(f, norm, Mixed);
-    observed += f.effects.hash + raw.effects.hash + norm.effects.hash;
+    same_storage(f, ranged, Mixed);
+    observed += f.effects.hash + raw.effects.hash + norm.effects.hash + f.effects.hooks +
+                raw.effects.hooks + norm.effects.hooks + ranged.effects.hash + ranged.effects.hooks;
 }
 int main(int argc, char** argv) {
+    if (range_groups != 1 && range_groups != 10 && range_groups != 100)
+        throw std::runtime_error("REGFW_BENCH_RANGES must be 1/10/100");
+    std::cout << "RANGE_GROUPS " << range_groups << " IDENTITY " << REGFW_BENCH_IDENTITY
+              << " INDEX " << REGFW_BENCH_INDEX << '\n';
+    if (hook_mode != "none" && hook_mode != "global" && hook_mode != "view" && hook_mode != "both")
+        throw std::runtime_error("REGFW_BENCH_PRE_ACCESS must be none/global/view/both");
+    std::cout << "PRE_ACCESS " << hook_mode << '\n';
     if (std::getenv("REGFW_BENCH_THREADS"))
         std::thread([] {}).join();
 #if defined(__GLIBC__)
@@ -547,7 +670,7 @@ int main(int argc, char** argv) {
     selected_callbacks = std::stoul(argv[4]);
     selected_pattern = argv[5];
     selected_writing = std::stoul(argv[6]);
-#if defined(REGFW_STATIC_BENCH)
+#if defined(REGFW_STATIC_BENCH) || defined(REGFW_BENCH_SINGLE_LAYOUT)
     for (bool callbacks : {false, true})
         run<REGFW_BENCH_STRIDE, REGFW_BENCH_MIXED>(callbacks, repeats);
 #else

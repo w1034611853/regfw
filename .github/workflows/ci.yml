@@ -2,7 +2,7 @@ name: C++20 SDK verification
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/regfw-037-single-thread-fastpath-20261117]
   pull_request:
 
 jobs:

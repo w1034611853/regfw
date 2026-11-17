@@ -101,7 +101,7 @@ class AddressView {
         auto out = *this;
         auto slot = std::make_shared<detail::PreAccessSlot>();
         slot->name = "inline";
-        slot->callback = std::make_shared<const detail::PreAccessSlot::Function>(std::move(f));
+        slot->callback = detail::bind_pre_access(std::move(f));
         slot->description = detail::callback_description<F>({}, at);
         out.window_.pre_access_inline_ = std::move(slot);
         return out;
