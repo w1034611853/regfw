@@ -73,28 +73,40 @@ struct ScalarAccessFrame {
     RegData raw, before, after;
     RegTransactionKind kind;
     const MappedAccessFrame* mapped{};
+    // Scalar plans borrow immutable mount metadata. Only address/index vary.
+    const RegElementIndex* prepared_index{};
+    std::uint64_t prepared_target{};
     template <class F>
-    REGFW_DETAIL_ALWAYS_INLINE decltype(auto) with_info(F&& callback) const {
+    REGFW_DETAIL_ALWAYS_INLINE decltype(auto) with_mapped_info(F&& callback) const {
         RegAccessInfo info;
         StoredField logical, physical;
+        mapped->fill(info, *this, &logical, &physical);
+        return std::forward<F>(callback)(info);
+    }
+    template <class F>
+    REGFW_DETAIL_ALWAYS_INLINE decltype(auto) with_info(F&& callback) const {
+        // Separate lifetimes let the compiler discard unused scalar fields.
         if (mapped)
-            mapped->fill(info, *this, &logical, &physical);
-        else
-            fill(info);
+            return with_mapped_info(std::forward<F>(callback));
+        RegAccessInfo info;
+        fill_scalar(info);
         return std::forward<F>(callback)(info);
     }
     REGFW_DETAIL_ALWAYS_INLINE void fill(RegAccessInfo& i) const {
-        if (mapped) {
+        if (mapped)
             mapped->fill(i, *this);
-            return;
-        }
+        else
+            fill_scalar(i);
+    }
+    REGFW_DETAIL_ALWAYS_INLINE void fill_scalar(RegAccessInfo& i) const {
         i.kind = kind;
         i.address = address;
-        i.alias_resolved_address = i.resolved_address = site->target;
+        i.alias_resolved_address = i.resolved_address =
+            prepared_index ? prepared_target : site->target;
         i.size = 4;
         i.register_width_bits = 32;
         i.bus_mask = 0xffffffff;
-        i.request_index = i.index = *site->callback_index;
+        i.request_index = i.index = *(prepared_index ? prepared_index : site->callback_index);
         i.raw_data = i.bus_data = raw;
         i.stored_before = before;
         i.stored_after = after;
@@ -321,18 +333,24 @@ enum class EventKind { ReadComplete, Write };
 
 template <class T, class Info, class F>
 void invoke_frame_event(void* target, RegData value, const ScalarAccessFrame& frame) {
-    frame.with_info([&](const RegAccessInfo& i) {
-        auto& f = *static_cast<F*>(target);
-        if constexpr (CommonInfoCallable<F>::value)
-            f(i);
-        else if constexpr (std::is_invocable_v<F&, T, const Info&>)
-            std::invoke(f, value_from_data<T>(value), Info(i, TrustedAccessTag{}));
-        else if constexpr (std::is_invocable_v<F&, const Info&>)
-            std::invoke(f, Info(i, TrustedAccessTag{}));
-        else
-            std::invoke(f);
-    });
+    if constexpr (!CommonInfoCallable<F>::value && !std::is_invocable_v<F&, T, const Info&> &&
+                  !std::is_invocable_v<F&, const Info&>) {
+        std::invoke(*static_cast<F*>(target));
+    } else {
+        frame.with_info([&](const RegAccessInfo& i) {
+            auto& f = *static_cast<F*>(target);
+            if constexpr (CommonInfoCallable<F>::value)
+                f(i);
+            else if constexpr (std::is_invocable_v<F&, T, const Info&>)
+                std::invoke(f, value_from_data<T>(value), Info(i, TrustedAccessTag{}));
+            else if constexpr (std::is_invocable_v<F&, const Info&>)
+                std::invoke(f, Info(i, TrustedAccessTag{}));
+            else
+                std::invoke(f);
+        });
+    }
 }
+
 class ScalarReadSource {
     using Full = std::function<RegData(RegData, const RegAccessInfo&)>;
     using Frame = std::function<RegData(RegData, const ScalarAccessFrame&)>;
@@ -523,9 +541,15 @@ class RegView final
                     return source_call<false>(*callable, value, info);
                 },
                 [callable](RegData value, const detail::ScalarAccessFrame& frame) {
-                    return frame.with_info([&](const RegAccessInfo& i) {
-                        return source_call<true>(*callable, value, i);
-                    });
+                    if constexpr (!detail::CommonInfoCallable<F>::value &&
+                                  !std::is_invocable_v<F&, T, const InfoType&> &&
+                                  !std::is_invocable_v<F&, const InfoType&>) {
+                        return read_result(value, *callable);
+                    } else {
+                        return frame.with_info([&](const RegAccessInfo& i) {
+                            return source_call<true>(*callable, value, i);
+                        });
+                    }
                 });
         }
     }
@@ -897,6 +921,7 @@ class RegisterMap {
     // and the dynamic AddressSpace compiler alike.
     std::unique_ptr<detail::FormulaDecoder> formula_;
     bool compiled_view_mode_{};
+    bool direct_scalar_mode_{};
     std::vector<LayoutWarning> mapping_warnings_;
     std::vector<std::unique_ptr<std::string>> compiled_names_;
     std::vector<std::unique_ptr<detail::ViewPreAccessChain>> view_pre_access_chains_;
@@ -995,6 +1020,7 @@ class RegisterMap {
                              RegTransactionKind kind,
                              RegData value,
                              const AliasEntry* selected);
+    const CompiledAccess* direct_scalar(std::uint64_t address);
     template <bool Writing>
     std::optional<RegData>
     fast_scalar(std::uint64_t address, RegData value, const CompiledAccess* selected);
@@ -1258,7 +1284,9 @@ class RegisterMap {
                 return detail::checked_access_result<V>(std::invoke(*callable, info));
             },
             [callable](const detail::ScalarAccessFrame& frame) {
-                return frame.with_info([&](const RegAccessInfo& i) {
+                // Frame-based index resolution is only called by mapped_scalar.
+                // Keep scalar info assembly out of this adapter entirely.
+                return frame.with_mapped_info([&](const RegAccessInfo& i) {
                     return detail::checked_access_result<V>(std::invoke(*callable, i));
                 });
             });

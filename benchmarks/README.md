@@ -97,6 +97,7 @@ done
 
 ## 单线程 RegView 与 MMIO 优化
 
+- `mmio_scalar.cpp` / `measure_mmio_scalar.py`：直接 Bundle/AddressSpace、按需 info、完整复制、logger、finish 及表大小对照，见 [Performance-MMIO-Scalar](../docs/Performance-MMIO-Scalar.md)。
 - `handles.cpp` / `measure_handles.py`：原生指针、`.at(i).bits`、`.at(i).ref()` 对照；构建和配对命令见 [Performance-Handles](../docs/Performance-Handles.md)。
 - `measure_hooks.py` / `measure_routes.py`：pre_access 与 identity/index 组合，见 [Performance-Hooks](../docs/Performance-Hooks.md)。
 - `sample_ips.cpp` / `summarize_ips.py`：可选 Linux x86_64 IP 采样，诊断结果见 [Performance-Dispatch](../docs/Performance-Dispatch.md)；正式计时不链接采样器。

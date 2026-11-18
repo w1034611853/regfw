@@ -106,16 +106,12 @@ class FormulaDecoder {
     // Bound once per mount. These stable references account for hooks,
     // per-instance storage, route, identity and access policy. A callback
     // slot may be changed by the user, so we never freeze its function value.
-    struct PreparedMountContext {
+    struct PreparedMountContext : ScalarAccessSite {
         const Mount* mount{};
         const Binding* binding{};
         EntityState* node{};
         const RegViewLayout* node_layout{};
         const ViewPreAccessChain* pre_access_chain{};
-        AccessRoute route{};
-        AliasAccessPolicy policy{};
-        std::optional<std::uint32_t> instance;
-        std::string_view view_name;
         std::uint32_t identity_index{STATIC_NONE};
         std::int32_t priority{};
         std::uint8_t scalar_directions{};
@@ -286,15 +282,19 @@ class FormulaDecoder {
                 const auto& scope = scopes_[mount.scope];
                 const auto identity_index =
                     scope.identity == STATIC_NONE ? STATIC_NONE : identity_base_ + scope.identity;
-                view.prepared.push_back({&mount,
+                view.prepared.push_back({{binding.canonical_base,
+                                          AccessRoute{scope.route, scope.instance.value_or(0)},
+                                          scope.policy,
+                                          scope.instance,
+                                          scope.instance,
+                                          scope.name,
+                                          nullptr,
+                                          binding.canonical_base != mount.base},
+                                         &mount,
                                          &binding,
                                          binding.node,
                                          &binding.node->layout(),
                                          scope.pre_access_chain,
-                                         AccessRoute{scope.route, scope.instance.value_or(0)},
-                                         scope.policy,
-                                         scope.instance,
-                                         scope.name,
                                          identity_index,
                                          scope.outer_priority});
             }
@@ -730,11 +730,16 @@ class FormulaDecoder {
         plan.write_path = (plan.directions & 2)          ? scalar_path
                           : (plan.mapped_directions & 2) ? Path::Mapped
                                                          : Path::Generic;
-        // A plain scalar needs no AliasEntry. Callback slots, borrow and
-        // logger remain live; nothing mutable is cached in the mount.
-        if (plan.directions && !hooks && !n.borrowed && !n.read_callback && !n.write_callback &&
-            !n.read_complete_callback && !owner_->logger_)
+        // Scalar callbacks need a stable mount plus the selected coordinate,
+        // not a fully materialized AliasEntry. Full info is built by the
+        // callback adapter only when its signature/body consumes it.
+        if (plan.directions && !hooks) {
+            plan.scalar_site = &context;
+            plan.scalar_index = &hit.access->index;
+            plan.scalar_target = binding.canonical_base + (word - context.mount->base);
+            plan.linear = binding.linear + hit.access->linear;
             return &plan;
+        }
         auto& out = scratch.decoded[0];
         fill_prepared(hit, word, out);
         plan.metadata = &out;

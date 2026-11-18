@@ -552,9 +552,117 @@ void field_lifetimes() {
     CHECK(b.map().mmio_write(A + 8, 8).success());
     CHECK(saved.mapped_as(P15) == 3 && moved.mapped_as(P15) == 1);
 }
+void same_scalar_info(const reg::RegAccessInfo& a, const reg::RegAccessInfo& b) {
+    CHECK(a.kind == b.kind && a.address == b.address &&
+          a.alias_resolved_address == b.alias_resolved_address &&
+          a.resolved_address == b.resolved_address && a.size == b.size &&
+          a.internal_byte_offset == b.internal_byte_offset &&
+          a.register_width_bits == b.register_width_bits && a.wide_values == b.wide_values);
+    CHECK(a.request_index == b.request_index && a.index == b.index && a.raw_data == b.raw_data &&
+          a.bus_data == b.bus_data && a.bus_mask == b.bus_mask &&
+          a.stored_before == b.stored_before && a.stored_after == b.stored_after);
+    CHECK(a.route == b.route && a.source_instance == b.source_instance &&
+          a.request_identity == b.request_identity && a.resolved_identity == b.resolved_identity &&
+          a.identity_domain == b.identity_domain && a.identity_mode == b.identity_mode &&
+          a.identity_source == b.identity_source && a.is_alias == b.is_alias &&
+          a.view_path == b.view_path && a.access_group == b.access_group);
+    CHECK(a.alias_access_policy.allow_read == b.alias_access_policy.allow_read &&
+          a.alias_access_policy.allow_write == b.alias_access_policy.allow_write &&
+          a.alias_access_policy.denied_read == b.alias_access_policy.denied_read &&
+          a.alias_access_policy.denied_write == b.alias_access_policy.denied_write);
+    for (const auto* info : {&a, &b}) {
+        bool absent = false;
+        try {
+            (void)info->index_as(L15);
+        } catch (const reg::Error&) {
+            absent = true;
+        }
+        CHECK(absent);
+        absent = false;
+        try {
+            (void)info->mapped_as(P15);
+        } catch (const reg::Error&) {
+            absent = true;
+        }
+        CHECK(absent);
+    }
+}
+void legacy_scalar_equivalence() {
+    reg::RegisterBank<R> fast(reg::space(0x100).name("LEGACY"));
+    reg::RegisterBank<R> generic(reg::space(0x100).name("LEGACY"));
+    fast.finish();
+    std::vector<reg::RegAccessInfo> fast_events, generic_events;
+    bool fail_read = false;
+    auto bind = [&](auto& bank, auto& events) {
+        // Install after finish: neither callback presence nor callable state
+        // may be frozen in the direct-access plan.
+        bank->ARRAY.on_write([&](const reg::RegAccessInfo& i) {
+            events.push_back(i);
+            bank->ARRAY.at_element(i.index.linear()).ref() += 1;
+        });
+        bank->ARRAY.on_read([&](std::uint32_t value, const auto& i) {
+            events.push_back(i);
+            if (fail_read)
+                throw std::runtime_error("read source failure");
+            return value ^ 0x55;
+        });
+        bank->ARRAY.on_read_complete([&](const reg::RegAccessInfo& i) {
+            events.push_back(i);
+        });
+        bank->MASK.on_write([&](const reg::RegAccessInfo& i) {
+            events.push_back(i);
+        });
+    };
+    bind(fast, fast_events);
+    bind(generic, generic_events);
+    std::uint64_t seed = 0x123456789abcdefULL;
+    const unsigned offsets[] = {
+        0, 4, 8, 12, 16, 20, 32, 36, 40, 48, 64, 72, 80, 88, 68, 95, 96, 255, 256};
+    for (unsigned k = 0; k != 900; ++k) {
+        if (k == 300) {
+            fast.map().set_pre_access([&](const auto&) {
+                fast->VALUE.ref() = 77;
+            });
+            generic.map().set_pre_access([&](const auto&) {
+                generic->VALUE.ref() = 77;
+            });
+        }
+        if (k == 600) {
+            fast.map().clear_pre_access();
+            generic.map().clear_pre_access();
+        }
+        fail_read = k % 17 == 0;
+        auto value = random(seed);
+        const auto address = offsets[value % std::size(offsets)];
+        const auto width = 1u << ((value >> 9) % 4);
+        auto fw = fast.map().mmio_write_sized(address, value, width);
+        auto gw = generic.map().mmio_write_sized(address, value, width);
+        CHECK(fw.result == gw.result);
+        auto fr = fast.map().try_mmio_read_sized(address, width);
+        auto gr = generic.map().try_mmio_read_sized(address, width);
+        CHECK(fr.result == gr.result && fr.value == gr.value);
+        CHECK(fast_events.size() == generic_events.size());
+        for (std::size_t i = 0; i != fast_events.size(); ++i)
+            same_scalar_info(fast_events[i], generic_events[i]);
+        fast_events.clear();
+        generic_events.clear();
+        if (k % 100 == 0)
+            CHECK(fast.save() == generic.save());
+    }
+    CHECK(fast.save() == generic.save());
+    fail_read = false;
+    CHECK(fast.map().mmio_write(72, 0x12345678).success());
+    CHECK(generic.map().mmio_write(72, 0x12345678).success());
+    CHECK(fast->ARRAY.at(1).ref() == 0x12345679);
+    CHECK(fast.map().mmio_read(72) == (0x12345679u ^ 0x55));
+    CHECK(generic.map().mmio_read(72) == (0x12345679u ^ 0x55));
+    for (std::size_t i = 0; i != fast_events.size(); ++i)
+        same_scalar_info(fast_events[i], generic_events[i]);
+}
 } // namespace
 int main() try {
     equivalent();
+    legacy_scalar_equivalence();
     callback_state_and_frames();
     late_bindings();
     callback_errors_and_dynamic_logging();

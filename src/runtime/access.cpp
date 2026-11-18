@@ -924,6 +924,32 @@ RegMmioReadResult RegisterMap::read_transaction(Resolution& r) {
 }
 
 // Scalar and mapped fast paths (preserve the same callback/transaction semantics).
+// Legacy direct maps already have a word-to-entity lookup. Reuse the scalar
+// executor instead of constructing an alias route and a complete Resolution.
+const RegisterMap::CompiledAccess* RegisterMap::direct_scalar(std::uint64_t address) {
+    const auto* entry = lookup_.get(address);
+    if (!entry || entry->byte_offset)
+        return nullptr;
+    auto& n = *entry->node;
+    if (!n.scalar32_directions || !n.derivations.empty())
+        return nullptr;
+    auto& plan = access_scratch_->decoded_access;
+    auto& site = access_scratch_->direct_site;
+    plan.metadata = nullptr;
+    plan.node = &n;
+    plan.scalar = n.scalar_data + std::size_t(entry->linear) * n.scalar_stride;
+    plan.mask = static_cast<std::uint32_t>(n.writable_mask);
+    plan.linear = entry->linear;
+    plan.scalar_site = &site;
+    plan.scalar_index = &entry->view->elements[entry->linear].index;
+    plan.scalar_target = address;
+    site.callback_instance = entry->source_instance;
+    using Path = CompiledAccess::Path;
+    plan.read_path = n.scalar32_directions & 1 ? Path::Scalar : Path::Generic;
+    plan.write_path = n.scalar32_directions & 2 ? Path::Scalar : Path::Generic;
+    return &plan;
+}
+
 template <bool Writing>
 std::optional<RegData>
 RegisterMap::fast_scalar(std::uint64_t address, RegData value, const CompiledAccess* selected) {
@@ -947,13 +973,15 @@ RegisterMap::fast_scalar(std::uint64_t address, RegData value, const CompiledAcc
     if (!writing && !n.read_callback && !n.read_complete_callback)
         return RegData(stored);
 
-    const auto* a = selected->metadata;
-    detail::ScalarAccessFrame frame{a,
+    detail::ScalarAccessFrame frame{selected->scalar_site,
                                     address,
                                     writing ? std::uint32_t(value) : 0,
                                     stored,
                                     writing ? after : stored,
-                                    writing ? RegTransactionKind::Write : RegTransactionKind::Read};
+                                    writing ? RegTransactionKind::Write : RegTransactionKind::Read,
+                                    nullptr,
+                                    selected->scalar_index,
+                                    selected->scalar_target};
     auto report = [&](std::string_view phase) {
         if (log_enabled(HLOG_LEVEL_ERROR)) {
             RegAccessInfo i;
@@ -987,8 +1015,8 @@ RegisterMap::fast_scalar(std::uint64_t address, RegData value, const CompiledAcc
         if (log_enabled(level)) {
             RegAccessInfo i;
             frame.fill(i);
-            const auto& e = *a->target_entry;
-            emit_log({level, "Read", e.view->elements[e.linear].name, &i, returned, {}, {}});
+            emit_log(
+                {level, "Read", n.layout().elements[selected->linear].name, &i, returned, {}, {}});
         }
     }
     if (source_ok)
@@ -1289,8 +1317,12 @@ RegisterMap::try_mmio_write_sized(std::uint64_t address, RegData value, unsigned
         DispatchGuard guard(*this);
         warn_truncated_write(address, value, size);
         const CompiledAccess* plan = nullptr;
-        if (compiled_view_mode_ && finalized_ && size == 4 && !(address & 3))
-            plan = formula_->fast_access(address, *access_scratch_);
+        if (finalized_ && size == 4 && !(address & 3)) {
+            if (compiled_view_mode_)
+                plan = formula_->fast_access(address, *access_scratch_);
+            else if (direct_scalar_mode_ && !pre_access_)
+                plan = direct_scalar(address);
+        }
         const auto* selected = plan ? plan->metadata : nullptr;
         if (plan) {
             switch (plan->write_path) {
@@ -1368,8 +1400,12 @@ RegMmioReadResult RegisterMap::try_mmio_read_sized(std::uint64_t address, unsign
     try {
         DispatchGuard guard(*this);
         const CompiledAccess* plan = nullptr;
-        if (compiled_view_mode_ && finalized_ && size == 4 && !(address & 3))
-            plan = formula_->fast_access(address, *access_scratch_);
+        if (finalized_ && size == 4 && !(address & 3)) {
+            if (compiled_view_mode_)
+                plan = formula_->fast_access(address, *access_scratch_);
+            else if (direct_scalar_mode_ && !pre_access_)
+                plan = direct_scalar(address);
+        }
         const auto* selected = plan ? plan->metadata : nullptr;
         if (plan) {
             switch (plan->read_path) {
