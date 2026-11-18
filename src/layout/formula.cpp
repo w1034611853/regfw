@@ -526,6 +526,9 @@ class FormulaInstaller {
             out.policy = effective[id];
             out.pre_access_chain = effective_pre[id] ? pre[id] : nullptr;
             out.identity = identities_for[id] == STATIC_NONE ? STATIC_NONE : identities_for[id];
+            out.preserve_identity_view =
+                out.identity != STATIC_NONE &&
+                plan.identities[out.identity].count <= FormulaDecoder::max_redirect_targets;
             out.name = *names[id];
         }
         for (std::uint32_t id = 0; id < plan.scopes.size(); ++id) {
@@ -548,7 +551,7 @@ class FormulaInstaller {
         decoder->mounts_.resize(plan.mounts.size());
         for (std::size_t id = 0; id < plan.mounts.size(); ++id) {
             const auto& m = plan.mounts[id];
-            decoder->mounts_[id] = {m.base, m.end, m.binding, m.scope, m.array, m.scalar, 0};
+            decoder->mounts_[id] = {m.base, m.end, m.binding, m.scope, m.array};
         }
         // A reserve is terminal. Preserve the word backend's diagnostic for the
         // register bytes it actually shadows (one warning per shadowed mount).

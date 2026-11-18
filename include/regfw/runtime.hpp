@@ -6,7 +6,12 @@
 #include <hlog.h>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
 #include <new>
+#include <type_traits>
+#include <utility>
 
 namespace hlog {
 class Logger;
@@ -46,8 +51,8 @@ struct MappedIndexSite {
     unsigned dimension{};
 };
 struct MappedAccessFrame {
-    const ScalarAccessSite* source{};
-    const ScalarAccessSite* target{};
+    std::uint64_t source_address{}, target_address{};
+    std::string_view view_name;
     const MappedIndexSite* mapping{};
     const AccessIdentity* identity{};
     const RegElementIndex* request{};
@@ -132,8 +137,8 @@ REGFW_DETAIL_ALWAYS_INLINE inline void MappedAccessFrame::fill(RegAccessInfo& i,
                                                                StoredField* physical) const {
     i.kind = f.kind;
     i.address = f.address;
-    i.alias_resolved_address = source->target;
-    i.resolved_address = target->target;
+    i.alias_resolved_address = source_address;
+    i.resolved_address = target_address;
     i.size = 4;
     i.internal_byte_offset = 0;
     i.register_width_bits = 32;
@@ -154,7 +159,7 @@ REGFW_DETAIL_ALWAYS_INLINE inline void MappedAccessFrame::fill(RegAccessInfo& i,
     i.route = route;
     i.alias_access_policy = policy;
     i.source_instance = instance;
-    i.view_path = target->view_name;
+    i.view_path = view_name;
     i.is_alias = used;
     i.access_group = group;
     if (identity) {
@@ -829,19 +834,19 @@ struct AccessResolverSlot {
     struct Function {
         using Full = std::function<RegData(const RegAccessInfo&)>;
         using Frame = std::function<RegData(const ScalarAccessFrame&)>;
+        using Coordinates = std::function<RegData(std::uint32_t, RegData)>;
         Full full;
         Frame frame;
-        Function(Full f, Frame p = {}) : full(std::move(f)), frame(std::move(p)) {
+        Coordinates coordinates;
+        Function(Full f, Frame p) : full(std::move(f)), frame(std::move(p)) {
         }
-        RegData operator()(const RegAccessInfo& i) const {
-            return full(i);
+        explicit Function(Coordinates c) : coordinates(std::move(c)) {
         }
-        RegData from_frame(const ScalarAccessFrame& f) const {
-            if (frame)
-                return frame(f);
-            RegAccessInfo i;
-            f.fill(i);
-            return full(i);
+        RegData operator()(const RegAccessInfo& i, RegData logical) const {
+            if (full)
+                return full(i);
+            return coordinates(i.resolved_identity.value_or(i.source_instance.value_or(0)),
+                               logical);
         }
     };
     std::string name;
@@ -849,17 +854,11 @@ struct AccessResolverSlot {
     CallbackDescription description;
     bool deferred{};
     bool required{};
-    RegData from_frame(const ScalarAccessFrame& frame) const {
+    RegData operator()(const RegAccessInfo& info, RegData logical) const {
         const auto* fn = callback.get();
         if (!fn)
             throw RegAccessDeriveError::device_error("access resolver is not bound: " + name);
-        return fn->from_frame(frame);
-    }
-    RegData operator()(const RegAccessInfo& info) const {
-        const auto* fn = callback.get();
-        if (!fn)
-            throw RegAccessDeriveError::device_error("access resolver is not bound: " + name);
-        return (*fn)(info);
+        return (*fn)(info, logical);
     }
 };
 } // namespace detail
@@ -989,14 +988,13 @@ class RegisterMap {
                              RegTransactionKind kind,
                              RegData value,
                              const AliasEntry* selected);
-    const CompiledAccess* direct_scalar(std::uint64_t address);
+    const CompiledAccess* direct_scalar(std::uint64_t address, bool writing);
     template <bool Writing>
     std::optional<RegData>
     fast_scalar(std::uint64_t address, RegData value, const CompiledAccess* selected);
     std::optional<RegData> fast_scalar_resolved(Resolution& r, bool writing);
-    template <bool Writing>
-    std::optional<RegMmioReadResult>
-    mapped_scalar(std::uint64_t address, RegData value, const CompiledAccess* selected);
+    template <bool Writing, class Selection>
+    RegMmioReadResult mapped_scalar(std::uint64_t address, RegData value, const Selection& source);
     RegData scalar32_events(const Entry& e,
                             RegAccessInfo& info,
                             const AccessIdentity* identity,
@@ -1236,6 +1234,8 @@ class RegisterMap {
     }
 
   public:
+    // The two-argument form receives the resolved identity (or the source
+    // instance, defaulting to zero) and this mapping's logical source value.
     template <class Tag, class V, class F>
     void set_access_resolver(FieldKey<Tag, V> key,
                              F f,
@@ -1248,17 +1248,25 @@ class RegisterMap {
                              F f,
                              std::source_location at = std::source_location::current()) {
         auto callable = std::make_shared<F>(std::move(f));
-        auto callback = std::make_shared<const detail::AccessResolverSlot::Function>(
-            [callable](const RegAccessInfo& info) {
-                return detail::checked_access_result<V>(std::invoke(*callable, info));
-            },
-            [callable](const detail::ScalarAccessFrame& frame) {
-                // Frame-based index resolution is only called by mapped_scalar.
-                // Keep scalar info assembly out of this adapter entirely.
-                return frame.with_mapped_info([&](const RegAccessInfo& i) {
-                    return detail::checked_access_result<V>(std::invoke(*callable, i));
+        using Function = detail::AccessResolverSlot::Function;
+        std::shared_ptr<const Function> callback;
+        if constexpr (std::is_invocable_v<F&, const RegAccessInfo&>) {
+            callback = std::make_shared<Function>(
+                [callable](const RegAccessInfo& info) {
+                    return detail::checked_access_result<V>(std::invoke(*callable, info));
+                },
+                [callable](const detail::ScalarAccessFrame& frame) {
+                    return frame.with_mapped_info([&](const RegAccessInfo& i) {
+                        return detail::checked_access_result<V>(std::invoke(*callable, i));
+                    });
                 });
+        } else {
+            static_assert(std::is_invocable_v<F&, std::uint32_t, RegData>,
+                          "index resolver must accept RegAccessInfo or (vf, logical)");
+            callback = std::make_shared<Function>([callable](std::uint32_t vf, RegData logical) {
+                return detail::checked_access_result<V>(std::invoke(*callable, vf, logical));
             });
+        }
         bind_access_resolver(
             key.id(), key.name, std::move(callback), detail::callback_description<F>(name, at));
     }

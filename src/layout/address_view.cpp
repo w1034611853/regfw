@@ -387,6 +387,9 @@ class ViewCompiler {
             s.identity = identity_for[id]
                              ? static_cast<std::uint32_t>(*identity_for[id] - identity_base)
                              : STATIC_NONE;
+            s.preserve_identity_view =
+                s.identity != STATIC_NONE &&
+                identities[s.identity].window.count <= FormulaDecoder::max_redirect_targets;
             s.name = *names[id];
         }
         std::vector<FormulaDecoder::Mount> formula_mounts;
@@ -643,13 +646,8 @@ class ViewCompiler {
             const auto binding = binding_id(node,
                                             c0.addresses[f.elements[k].index],
                                             static_cast<std::uint32_t>(f.elements[k].index));
-            formula_mounts.push_back({first,
-                                      first + spec.span,
-                                      binding,
-                                      static_cast<std::uint32_t>(id),
-                                      array,
-                                      static_cast<bool>(node->value_size == 4 && node->scalar_data),
-                                      0});
+            formula_mounts.push_back(
+                {first, first + spec.span, binding, static_cast<std::uint32_t>(id), array});
         };
         for (std::size_t id = 0; id < flat_.size(); ++id) {
             const auto& f = flat_[id];

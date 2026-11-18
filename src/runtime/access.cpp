@@ -322,11 +322,7 @@ RegisterMap::Resolution& RegisterMap::resolve_plan(std::uint64_t address,
         used = source->used;
         if constexpr (Mode == 2) {
             const auto& w = identities_.at(*source->identity_index);
-            const auto matched =
-                size == 4 && source->redirect_targets
-                    ? std::optional(std::pair{source->identity_request, source->identity_inner})
-                    : w.match(address, size, instance);
-            if (auto match = matched) {
+            if (auto match = w.match(address, size, instance)) {
                 const auto* fn =
                     (w.resolver ? w.resolver->callback.get() : identity_resolver_.get());
                 if (!fn)
@@ -356,9 +352,7 @@ RegisterMap::Resolution& RegisterMap::resolve_plan(std::uint64_t address,
                     w.domain, match->first, id, w.mode, IdentityAddressSource::Bus, w.trace_labels};
                 if (w.mode == IdentityRemapMode::RedirectBank) {
                     const auto address2 = w.base + std::uint64_t(id) * w.stride + match->second;
-                    target = source->redirect_targets
-                                 ? source->redirect_targets[id]
-                                 : view_entry(address2, access_scratch_->decoded[1]);
+                    target = view_entry(address2, access_scratch_->decoded[1]);
                     if (!target)
                         throw Error("unmapped entity view address", ErrorKind::Decode);
                     target_lane = address2 & 3;
@@ -473,7 +467,7 @@ void RegisterMap::derive(Resolution& r) {
         i.mapped_fields.entries.activate();
         i.index_fields.entries[0] = {plan->source, plan->source_name, original, plan->dimension};
         i.index_fields.size = 1;
-        const auto value = (*plan->resolver)(i);
+        const auto value = (*plan->resolver)(i, original);
         i.mapped_fields.entries[0] = {plan->output,
                                       plan->output_name,
                                       value,
@@ -923,7 +917,7 @@ RegMmioReadResult RegisterMap::read_transaction(Resolution& r) {
 // Scalar and mapped fast paths (preserve the same callback/transaction semantics).
 // Legacy direct maps already have a word-to-entity lookup. Reuse the scalar
 // executor instead of constructing an alias route and a complete Resolution.
-const RegisterMap::CompiledAccess* RegisterMap::direct_scalar(std::uint64_t address) {
+const RegisterMap::CompiledAccess* RegisterMap::direct_scalar(std::uint64_t address, bool writing) {
     const auto* entry = lookup_.get(address);
     if (!entry || entry->byte_offset)
         return nullptr;
@@ -942,8 +936,7 @@ const RegisterMap::CompiledAccess* RegisterMap::direct_scalar(std::uint64_t addr
     plan.scalar_target = address;
     site.callback_instance = entry->source_instance;
     using Path = CompiledAccess::Path;
-    plan.read_path = n.scalar32_directions & 1 ? Path::Scalar : Path::Generic;
-    plan.write_path = n.scalar32_directions & 2 ? Path::Scalar : Path::Generic;
+    plan.path = n.scalar32_directions & (writing ? 2 : 1) ? Path::Scalar : Path::Generic;
     return &plan;
 }
 
@@ -1024,27 +1017,31 @@ RegisterMap::fast_scalar(std::uint64_t address, RegData value, const CompiledAcc
     return returned;
 }
 
-template <bool Writing>
-std::optional<RegMmioReadResult>
-RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const CompiledAccess* selected) {
+template <bool Writing, class Selection>
+RegMmioReadResult
+RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection& source) {
     constexpr bool writing = Writing;
-    const auto* source = selected->metadata;
-    const auto* target = source;
-    auto route = source->route;
-    auto policy = source->policy;
-    auto instance = source->instance;
-    bool used = source->used;
+    const auto& origin = *source.context;
+    const auto source_address = source.canonical(address);
+    auto target = source;
+    auto target_address = source_address;
+    auto route = origin.route;
+    auto policy = origin.policy;
+    auto instance = origin.instance;
+    bool used = origin.used;
     std::optional<AccessIdentity> identity;
-    if (source->identity_index) {
-        const auto& w = identities_[*source->identity_index];
-        const auto* fn = (w.resolver ? w.resolver->callback.get() : identity_resolver_.get());
+    if (origin.identity_index != detail::STATIC_NONE) {
+        const auto& w = identities_[origin.identity_index];
+        const auto* fn = w.resolver ? w.resolver->callback.get() : identity_resolver_.get();
         if (!fn)
             throw Error("identity resolver is not configured", ErrorKind::Configuration);
+        const auto request = origin.request_id;
+        const auto inner = origin.mount_inner + (address - origin.mount->base);
         IdentityResolveRequest req{w.domain,
-                                   source->identity_request,
+                                   request,
                                    address,
-                                   source->target,
-                                   source->identity_inner,
+                                   source_address,
+                                   inner,
                                    4,
                                    route,
                                    IdentityAddressSource::Bus};
@@ -1062,74 +1059,95 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const CompiledA
         if (id >= w.count)
             throw Error("resolved identity out of range", ErrorKind::Identity);
         identity = AccessIdentity{
-            w.domain, req.request_id, id, w.mode, IdentityAddressSource::Bus, w.trace_labels};
+            w.domain, request, id, w.mode, IdentityAddressSource::Bus, w.trace_labels};
         if (w.mode == IdentityRemapMode::RedirectBank) {
-            target = source->redirect_targets
-                         ? source->redirect_targets[id]
-                         : formula_->redirect(*source,
-                                              id,
-                                              w.base + std::uint64_t(id) * w.stride +
-                                                  source->identity_inner,
-                                              access_scratch_->decoded[1]);
-            if (!target || !target->defined || !target->target_entry)
-                throw Error("unmapped entity view address", ErrorKind::Decode);
+            const auto bus = w.base + std::uint64_t(id) * w.stride + inner;
+            target = source.redirected(id);
+            target_address = target.canonical(bus);
             if (route.is_direct())
-                route = target->route;
-            policy = policy.intersect(target->policy);
+                route = target.context->route;
+            policy = policy.intersect(target.context->policy);
             if (!instance)
-                instance = req.request_id;
-            used |= target->used;
+                instance = request;
+            used |= target.context->used;
         }
     }
-    auto entry = *target->target_entry;
-    auto& n = *entry.node;
-    // Identity resolution has already selected the storage. If no following
-    // operation consumes access info, avoid constructing any callback context.
-    if (!n.single_index && !pre_access_ && !target->pre_access_chain && !logger_ &&
-        (writing ? policy.allow_write && !n.write_callback
-                 : policy.allow_read && !n.read_callback && !n.read_complete_callback)) {
-        auto* data = n.scalar_data + std::size_t(entry.linear) * n.scalar_stride;
-        std::uint32_t stored;
-        std::memcpy(&stored, data, 4);
+    const auto& bound = *target.context;
+    const auto& coordinate = target.access->index;
+    auto linear = bound.binding->linear + target.access->linear;
+    auto& n = *bound.node;
+    auto data_at = [&](std::uint32_t index) {
+        return n.scalar_data + std::size_t(index) * n.scalar_stride;
+    };
+    auto word_at = [&](std::uint32_t index) {
+        std::uint32_t word;
+        std::memcpy(&word, data_at(index), sizeof(word));
+        return word;
+    };
+    const auto* plan = n.single_index.get();
+    const auto* resolver = plan ? plan->resolver->callback.get() : nullptr;
+    const auto logical = plan ? coordinate.values[plan->dimension] : 0;
+    const bool allowed = writing ? policy.allow_write : policy.allow_read;
+    const bool hooks = pre_access_ || bound.pre_access_chain;
+    const bool callbacks =
+        writing ? bool(n.write_callback) : n.read_callback || n.read_complete_callback;
+    const bool unobserved = !hooks && !callbacks;
+    const auto plain = [&](std::uint32_t index, std::uint32_t before) {
         if constexpr (Writing) {
             const auto mask = std::uint32_t(n.writable_mask);
-            const auto after = (stored & ~mask) | (std::uint32_t(value) & mask);
-            std::memcpy(data, &after, 4);
+            const auto after = (before & ~mask) | (std::uint32_t(value) & mask);
+            std::memcpy(data_at(index), &after, sizeof(after));
             return RegMmioReadResult{0};
         } else {
-            return RegMmioReadResult{stored};
+            return RegMmioReadResult{before};
         }
-    }
+    };
+    const auto logical_before = word_at(linear);
+    if (!plan && allowed && unobserved && !logger_)
+        return plain(linear, logical_before);
+
     detail::MappedAccessFrame mapped;
-    mapped.source = source;
-    mapped.target = target;
-    mapped.identity = identity ? &*identity : nullptr;
-    mapped.request = target->callback_index;
-    mapped.linear = entry.linear;
-    mapped.route = route;
-    mapped.policy = policy;
-    mapped.instance = instance ? instance : entry.source_instance;
-    mapped.used = used;
-    mapped.index_scratch = &access_scratch_->index;
-    mapped.mapped_scratch = &access_scratch_->mapped;
-    detail::ScalarAccessFrame frame{target,
+    detail::ScalarAccessFrame frame{&bound,
                                     address,
                                     writing ? std::uint32_t(value) : 0,
-                                    n.read_scalar(entry.linear),
-                                    0,
+                                    logical_before,
+                                    logical_before,
                                     writing ? RegTransactionKind::Write : RegTransactionKind::Read,
                                     &mapped};
-    frame.after = frame.before;
+    // A rich resolver, register hook or denied access always needs this
+    // frame. Only the unobserved coordinate-only case defers assembly.
+    const bool deferred = unobserved && allowed && resolver && resolver->coordinates;
+    auto populate = [&] {
+        mapped.source_address = source_address;
+        mapped.target_address = target_address;
+        mapped.view_name = bound.view_name;
+        mapped.identity = identity ? &*identity : nullptr;
+        mapped.request = &coordinate;
+        mapped.linear = linear;
+        mapped.route = route;
+        mapped.policy = policy;
+        mapped.instance = instance ? instance : bound.instance;
+        mapped.used = used;
+        mapped.index_scratch = &access_scratch_->index;
+        mapped.mapped_scratch = &access_scratch_->mapped;
+        if (allowed && plan) {
+            mapped.mapping = plan;
+            mapped.group = n.derivations.front().name;
+            mapped.logical = logical;
+        }
+    };
+    if (!deferred)
+        populate();
     auto resolution = [&]() -> Resolution& {
         auto& r = access_scratch_->resolution;
-        r.entry = entry;
+        r.entry = {&n, linear, 0, bound.instance, bound.node_layout, &coordinate};
         r.identity = identity;
-        r.alias = {target->target, route, policy, target->pre_access_chain};
+        r.alias = {target_address, route, policy, bound.pre_access_chain};
         frame.fill(r.info);
         return r;
     };
     const auto invalid = INVALID_READ_VALUE & 0xffffffff;
-    if (writing ? !policy.allow_write : !policy.allow_read) {
+    if (!allowed) {
         auto& r = resolution();
         emit_log({HLOG_LEVEL_WARN,
                   writing ? "alias write denied" : "alias read denied",
@@ -1145,41 +1163,54 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const CompiledA
                                      ? RegMemTxResult::Ignored
                                      : RegMemTxResult::AccessError};
     }
-    if (const auto* plan = n.single_index.get()) {
-        mapped.mapping = plan;
-        mapped.group = n.derivations.front().name;
-        mapped.logical = mapped.request->values[plan->dimension];
+    if (plan) {
+        auto failed = [&](RegMemTxResult result) {
+            if (log_enabled(HLOG_LEVEL_ERROR)) {
+                if (deferred)
+                    populate();
+                auto& r = resolution();
+                log_error("access mapping/validation", n.name, &r.info);
+            }
+            return RegMmioReadResult{writing ? 0 : invalid, result};
+        };
         try {
-            mapped.mapped = plan->resolver->from_frame(frame);
+            if (!resolver)
+                throw RegAccessDeriveError::device_error("access resolver is not bound: " +
+                                                         plan->resolver->name);
+            if (resolver->coordinates) {
+                const auto id = identity ? identity->resolved_id
+                                         : instance.value_or(bound.instance.value_or(0));
+                mapped.mapped = resolver->coordinates(id, logical);
+            } else {
+                mapped.mapped = resolver->frame(frame);
+            }
             mapped.has_mapped = true;
             if (mapped.mapped >= plan->extent)
                 throw RegAccessDeriveError::access_error("mapped element out of range");
             mapped.index_valid = true;
-            const auto old = mapped.request->values[plan->dimension];
-            if (mapped.mapped != old) {
-                entry.linear = entry.linear - old * plan->coefficient +
-                               static_cast<std::uint32_t>(mapped.mapped) * plan->coefficient;
-                mapped.linear = entry.linear;
-                frame.before = frame.after = n.read_scalar(entry.linear);
-            }
+            if (mapped.mapped != logical)
+                linear = linear - logical * plan->coefficient +
+                         static_cast<std::uint32_t>(mapped.mapped) * plan->coefficient;
         } catch (const Error& error) {
-            auto& r = resolution();
-            log_error("access mapping/validation", n.name, &r.info);
-            return RegMmioReadResult{writing ? 0 : invalid, error.result};
+            return failed(error.result);
         } catch (...) {
-            auto& r = resolution();
-            log_error("access mapping/validation", n.name, &r.info);
-            return RegMmioReadResult{writing ? 0 : invalid, RegMemTxResult::DeviceError};
+            return failed(RegMemTxResult::DeviceError);
         }
+        if (unobserved && !logger_)
+            return plain(linear, word_at(linear));
+        if (deferred)
+            populate();
+        mapped.linear = linear;
     }
-    if (pre_access_ || target->pre_access_chain) {
-        if (!pre(n, target->pre_access_chain, frame))
+    if (hooks) {
+        if (plan && mapped.mapped != logical)
+            frame.before = frame.after = word_at(linear);
+        if (!pre(n, bound.pre_access_chain, frame))
             return RegMmioReadResult{writing ? 0 : REG_READ_CALLBACK_ERROR_MAGIC & 0xffffffff,
                                      writing ? RegMemTxResult::Ignored : RegMemTxResult::Ok};
     }
-    auto* p = n.scalar_data + std::size_t(entry.linear) * n.scalar_stride;
-    std::uint32_t before;
-    std::memcpy(&before, p, 4);
+    auto* p = data_at(linear);
+    const auto before = plan || hooks ? word_at(linear) : logical_before;
     frame.before = frame.after = before;
     auto log = [&](RegData returned) {
         if (access_log_enabled(n)) {
@@ -1309,24 +1340,23 @@ RegMmioWriteResult
 RegisterMap::try_mmio_write_sized(std::uint64_t address, RegData value, unsigned size) {
     try {
         warn_truncated_write(address, value, size);
+        detail::FormulaDecoder::PreparedHit hit{};
         const CompiledAccess* plan = nullptr;
         if (finalized_ && size == 4 && !(address & 3)) {
             if (compiled_view_mode_)
-                plan = formula_->fast_access(address, *access_scratch_);
+                plan = formula_->fast_access(address, true, *access_scratch_, hit);
             else if (direct_scalar_mode_ && !pre_access_)
-                plan = direct_scalar(address);
+                plan = direct_scalar(address, true);
         }
         const auto* selected = plan ? plan->metadata : nullptr;
         if (plan) {
-            switch (plan->write_path) {
+            switch (plan->path) {
                 case CompiledAccess::Path::Scalar:
                     if (fast_scalar<true>(address, value, plan))
                         return {};
                     break;
                 case CompiledAccess::Path::Mapped:
-                    if (auto fast = mapped_scalar<true>(address, value, plan))
-                        return {fast->result};
-                    break;
+                    return {mapped_scalar<true>(address, value, hit).result};
                 case CompiledAccess::Path::Generic:
                     break;
             }
@@ -1388,24 +1418,23 @@ RegMmioReadResult RegisterMap::try_mmio_read_sized(std::uint64_t address, unsign
                              ? INVALID_READ_VALUE & detail::low_mask(size * 8)
                              : 0;
     try {
+        detail::FormulaDecoder::PreparedHit hit{};
         const CompiledAccess* plan = nullptr;
         if (finalized_ && size == 4 && !(address & 3)) {
             if (compiled_view_mode_)
-                plan = formula_->fast_access(address, *access_scratch_);
+                plan = formula_->fast_access(address, false, *access_scratch_, hit);
             else if (direct_scalar_mode_ && !pre_access_)
-                plan = direct_scalar(address);
+                plan = direct_scalar(address, false);
         }
         const auto* selected = plan ? plan->metadata : nullptr;
         if (plan) {
-            switch (plan->read_path) {
+            switch (plan->path) {
                 case CompiledAccess::Path::Scalar:
                     if (auto fast = fast_scalar<false>(address, 0, plan))
                         return {*fast};
                     break;
                 case CompiledAccess::Path::Mapped:
-                    if (auto fast = mapped_scalar<false>(address, 0, plan))
-                        return *fast;
-                    break;
+                    return mapped_scalar<false>(address, 0, hit);
                 case CompiledAccess::Path::Generic:
                     break;
             }

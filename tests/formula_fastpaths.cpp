@@ -202,11 +202,52 @@ struct RoutedTable : reg::RegEntityBundle {
         .coordinates = {{TableLogical, 1}},
         .derive = {reg::map_index(TableLogical, TablePhysical).using_resolver(TablePhysical)});
 };
+struct RoutedOverlay : reg::RegEntityBundle {
+    REG_BUNDLE(RoutedOverlay);
+    REG(STATUS, std::uint32_t, reg::at(0).access(reg::w1c).reset(0xffff));
+};
+struct Ordinary : reg::RegEntityBundle {
+    REG_BUNDLE(Ordinary);
+    REG(DATA, std::uint32_t, reg::at(0).array(reg::dims(64), reg::strides(4)));
+};
+struct Status : reg::RegEntityBundle {
+    REG_BUNDLE(Status);
+    REG(DATA, std::uint32_t, reg::at(0).array(reg::dims(64), reg::strides(4)).access(reg::w1c));
+};
+struct MixedBanks : reg::Bundle {
+    REG_BUNDLE(MixedBanks);
+    REG_ENTITY(ordinary, Ordinary);
+    REG_ENTITY(status, Status);
+    REG_LAYOUT([&] {
+        return reg::address_space("MIXED").map_repeat(
+            "VF", 0, reg::repeat(2).stride(0x100), [&](auto i) {
+                auto v = reg::view("V", 0x100).identity(19).using_resolver(TableRoute);
+                return v.map(i ? status.DATA : ordinary.DATA);
+            });
+    });
+};
+void redirected_behavior(bool finished) {
+    reg::RegisterBank<MixedBanks> bank(reg::space(0x200));
+    unsigned selected = 0, routes = 0;
+    bank.map().set_identity_resolver(TableRoute, [&](const auto&) {
+        ++routes;
+        return selected;
+    });
+    if (finished)
+        bank.finish();
+    // Both VFs have identical offsets, array shape and storage width. Only
+    // the selected destination determines the actual write behavior.
+    CHECK(bank.map().mmio_write(4, 0xff).success() && bank->ordinary.DATA.at(1) == 0xff);
+    selected = 1;
+    bank->status.DATA.at(1).ref() = 0xffff;
+    CHECK(bank.map().mmio_write(4, 0xf0).success() && bank->status.DATA.at(1) == 0xff0f);
+    CHECK(bank.map().mmio_read(4) == 0xff0f && bank->ordinary.DATA.at(1) == 0xff && routes == 3);
+}
 template <bool Overlay>
 struct RoutedLayout : reg::Bundle {
     REG_BUNDLE(RoutedLayout);
     REG_REPEAT_ENTITY(vf, RoutedTable, 3);
-    REG_ENTITY(overlay, Inner);
+    REG_ENTITY(overlay, RoutedOverlay);
     REG_LAYOUT([&] {
         auto root = reg::view("ROUTES", 0x2000)
                         .map_repeat("VF", 0, reg::repeat(3).stride(0x600), [&](auto i) {
@@ -226,19 +267,47 @@ struct RoutedLayout : reg::Bundle {
             .map(root.read_only_ignore_writes(), 0xc200000000ULL);
     });
 };
+void check_routed_info(const reg::RegAccessInfo& a, const reg::RegAccessInfo& b) {
+    CHECK(a.kind == b.kind && a.address == b.address &&
+          a.alias_resolved_address == b.alias_resolved_address &&
+          a.resolved_address == b.resolved_address && a.size == b.size &&
+          a.internal_byte_offset == b.internal_byte_offset &&
+          a.register_width_bits == b.register_width_bits && !a.wide_values && !b.wide_values);
+    CHECK(a.request_index == b.request_index && a.index == b.index && a.raw_data == b.raw_data &&
+          a.bus_data == b.bus_data && a.bus_mask == b.bus_mask &&
+          a.stored_before == b.stored_before && a.stored_after == b.stored_after);
+    CHECK(a.route == b.route && a.source_instance == b.source_instance &&
+          a.request_identity == b.request_identity && a.resolved_identity == b.resolved_identity &&
+          a.identity_domain == b.identity_domain && a.identity_mode == b.identity_mode &&
+          a.identity_source == b.identity_source && a.is_alias == b.is_alias &&
+          a.view_path == b.view_path && a.access_group == b.access_group);
+    const auto& pa = a.alias_access_policy;
+    const auto& pb = b.alias_access_policy;
+    CHECK(pa.allow_read == pb.allow_read && pa.allow_write == pb.allow_write &&
+          pa.denied_read == pb.denied_read && pa.denied_write == pb.denied_write);
+    CHECK(a.index_as(TableLogical) == b.index_as(TableLogical) &&
+          a.mapped_as(TablePhysical) == b.mapped_as(TablePhysical));
+}
 template <bool Overlay>
 void routed_tables() {
     reg::RegisterBank<RoutedLayout<Overlay>> fast(reg::space().name("TABLE_ROUTE"));
     reg::RegisterBank<RoutedLayout<Overlay>> generic(reg::space().name("TABLE_ROUTE"));
-    unsigned shift = 1, fast_hooks = 0, generic_hooks = 0;
+    unsigned shift = 1, fast_hooks = 0, generic_hooks = 0, routes = 0;
     reg::RegAccessInfo fast_info, generic_info;
     auto bind = [&](auto& bank, unsigned& hooks, reg::RegAccessInfo& saved) {
         bank.map().set_identity_resolver(TableRoute, [&](const auto& r) {
+            ++routes;
             return (r.request_id + shift) % 3;
         });
-        bank.map().set_access_resolver(TablePhysical, [&](const reg::RegAccessInfo& i) {
-            return (i.index_as(TableLogical) + shift) % 32;
-        });
+        auto convert = [&](std::uint32_t vf, reg::RegData logical) {
+            return (vf + logical + shift) % 32;
+        };
+        if (&bank == &fast)
+            bank.map().set_access_resolver(TablePhysical, convert);
+        else
+            bank.map().set_access_resolver(TablePhysical, [convert](const reg::RegAccessInfo& i) {
+                return convert(i.resolved_id(), i.index_as(TableLogical));
+            });
         bank.map().set_pre_access(TableCheck, [&hooks, &saved](const reg::RegAccessInfo& i) {
             ++hooks;
             saved = i;
@@ -250,16 +319,28 @@ void routed_tables() {
     // Independent expectations cover dense-table holes and trimmed bounds.
     for (auto* bank : {&fast, &generic}) {
         const auto base = 0xc100000000ULL;
+        if constexpr (Overlay) {
+            // VF0's plain table word redirects to a higher-priority W1C register in VF1.
+            const auto before = routes;
+            CHECK(bank->map().mmio_write(base + 0x50, 0xf0).success());
+            CHECK((*bank)->overlay.STATUS.ref() == 0xff0f);
+            CHECK(bank->map().mmio_read(base + 0x50) == 0xff0f && routes == before + 2);
+        }
         CHECK(bank->map().mmio_write(base + 0x40, 0x12345678).success());
-        CHECK((*bank)->vf[1].DATA.at(0, 1) == 0x00340078);
+        CHECK((*bank)->vf[1].DATA.at(0, 2) == 0x00340078);
         CHECK(bank->map().mmio_read(base + 0x40) == 0x00340078);
         for (const auto hole : {0x30u, 0xc0u, 0x2a0u})
             CHECK(bank->map().try_mmio_read_sized(base + hole, 4).result ==
                   reg::RegMemTxResult::DecodeError);
         CHECK(bank->map().mmio_write(0xc200000040ULL, 0).result == reg::RegMemTxResult::Ignored);
-        CHECK((*bank)->vf[1].DATA.at(0, 1) == 0x00340078);
+        CHECK((*bank)->vf[1].DATA.at(0, 2) == 0x00340078);
     }
     // The generic bank keeps the full resolver/permission/overlay decoder.
+    auto check_hooks = [&] {
+        CHECK(fast_hooks == generic_hooks);
+        if (fast_hooks)
+            check_routed_info(fast_info, generic_info);
+    };
     for (shift = 0; shift < 3; ++shift)
         for (const auto base : {0xc100000000ULL, 0xff7100000000ULL, 0xc200000000ULL})
             for (unsigned vf = 0; vf < 3; ++vf)
@@ -269,21 +350,11 @@ void routed_tables() {
                     auto a = fast.map().mmio_write(address, data);
                     auto b = generic.map().mmio_write(address, data);
                     CHECK(a.result == b.result);
+                    check_hooks();
                     auto x = fast.map().try_mmio_read_sized(address, 4);
                     auto y = generic.map().try_mmio_read_sized(address, 4);
                     CHECK(x.result == y.result && x.value == y.value);
-                    CHECK(fast_hooks == generic_hooks);
-                    if (fast_hooks) {
-                        CHECK(fast_info.address == generic_info.address &&
-                              fast_info.resolved_address == generic_info.resolved_address &&
-                              fast_info.request_id() == generic_info.request_id() &&
-                              fast_info.resolved_id() == generic_info.resolved_id() &&
-                              fast_info.index.linear() == generic_info.index.linear() &&
-                              fast_info.index_as(TableLogical) ==
-                                  generic_info.index_as(TableLogical) &&
-                              fast_info.mapped_as(TablePhysical) ==
-                                  generic_info.mapped_as(TablePhysical));
-                    }
+                    check_hooks();
                 }
     CHECK(fast.save() == generic.save());
 }
@@ -294,6 +365,8 @@ int main() try {
     exercise_geometry<StaticLayout>();
     memo_dynamic_state();
     scope_depth_priority();
+    redirected_behavior(false);
+    redirected_behavior(true);
     routed_tables<false>();
     routed_tables<true>();
     std::cout

@@ -548,6 +548,8 @@ map.set_access_resolver(PhysicalPool, "Device::pool",
 
 `info.resolved_id()` 可取得 identity 已转换后的 VF；PF 未经过 identity 时不要直接调用，先检查 `info.has_identity()` / condition。`.when(identity_domain(...))` 为条件匹配；否则用 passthrough 保留逻辑坐标。
 
+命名 resolver 也接受 `(std::uint32_t vf, reg::RegData logical)`。第一个参数优先取转换后的身份，其次取来源实例，两者均缺失时取 0。第二个参数是本条规则的源坐标值，包含已声明的坐标转换。需要区分“无实例”和“实例 0”的 resolver 应使用完整 info。两种签名都可调用时优先采用完整 info 签名。设备可以在访问之间修改回调引用的路由表。示例见[绑定设备逻辑](Device.md)。
+
 规则只作用于 `.members` 指定的实体，其他寄存器不会自动参加。members 必须是整个实体的 view，不能是 array.at(i) 或 subspan。支持多个规则/组，但同一维度若给出互相矛盾的有效下标会失败。输出必须非负、在目标维度范围内且符合声明字段类型。
 
 使用 `info.index_as(LogicalPool)` 取得原始命名坐标，`info.mapped_as(PhysicalPool)` 取得派生值。`info.request_index` 是转换前完整数组坐标，`info.index` 是转换后完整坐标；`.get()` 对一维返回单个整数，对多维返回 tuple。`index=2` 这类日志字段是展平编号。

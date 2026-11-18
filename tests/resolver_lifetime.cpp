@@ -154,6 +154,122 @@ void exercise(unsigned width, bool hook, bool throwing) {
     b.clear();
     CHECK(identity_weak.expired() && index_weak.expired() && destroyed == 3);
 }
+// A resolver may change storage. pre_access sees the request's saved value if
+// the index is unchanged, or the newly selected value if the index changes.
+void index_observation(bool finished, bool light, unsigned width) {
+    reg::RegisterBank<Device<true>> bank(reg::space(128));
+    auto& map = bank.map();
+    auto& words = bank->vf[1].X;
+    map.set_identity_resolver(Route, [](const auto&) {
+        return 1u;
+    });
+    unsigned selected = 1;
+    unsigned calls = 0;
+    reg::RegAccessInfo resolver, pre, write;
+    auto convert = [&](std::uint32_t vf, reg::RegData logical) {
+        ++calls;
+        CHECK(vf == 1 && logical == 1);
+        words.at(1).ref() = 33;
+        words.at(0).ref() = 44;
+        return selected;
+    };
+    if (light)
+        map.set_access_resolver(P, convert);
+    else
+        map.set_access_resolver(P, [&](const reg::RegAccessInfo& i) {
+            resolver = i;
+            return convert(i.resolved_id(), i.index_as(L));
+        });
+    map.set_pre_access([&](const reg::RegAccessInfo& i) {
+        pre = i;
+        words.at(selected).ref() = 55;
+    });
+    words.on_write([&](const reg::RegAccessInfo& i) {
+        write = i;
+    });
+    if (finished)
+        bank.finish();
+    for (const auto result : {1u, 0u}) {
+        selected = result;
+        words.at(1).ref() = 22;
+        CHECK(map.mmio_write_sized(4, 0xab, width).success());
+        if (!light) {
+            CHECK(resolver.stored_before == 22 && resolver.index.linear() == 1);
+            CHECK(resolver.index_as(L) == 1 && resolver.request_id() == 0 &&
+                  resolver.resolved_id() == 1);
+        }
+        CHECK(pre.stored_before == (selected == 1 ? 22u : 44u));
+        CHECK(pre.index.linear() == selected && pre.request_index.linear() == 1 &&
+              pre.index_as(L) == 1 && pre.mapped_as(P) == selected);
+        CHECK(write.stored_before == 55 && write.stored_after == 0xab &&
+              words.at(selected).ref() == 0xab);
+    }
+    CHECK(calls == 2);
+}
+
+// The second coordinate is narrowed to uint8_t before the named mapping sees
+// it. An un-routed register supplies its source instance, or zero when absent.
+REG_ACCESS_FIELD(Column, std::uint8_t);
+void light_without_identity(std::optional<std::uint32_t> instance, bool finished) {
+    reg::RegisterMap map(4096, "NO_IDENTITY");
+    auto words = map.create_reg<std::uint32_t>(
+        0, "WORDS", reg::at(0).array(reg::dims(2, 260), reg::strides(1040, 4)), instance);
+    reg::Groups groups;
+    groups.group("TABLE")
+        .members(words)
+        .coordinate(L, reg::index<0>)
+        .coordinate(Column, reg::index<1>)
+        .derive(P)
+        .from(Column)
+        .using_resolver(P);
+    groups.install();
+    unsigned calls = 0;
+    int output = 7;
+    map.set_access_resolver(P, [&](std::uint32_t vf, reg::RegData logical) {
+        ++calls;
+        CHECK(vf == instance.value_or(0) && logical == 2);
+        if (output == -2)
+            throw std::runtime_error("device error");
+        return output;
+    });
+    if (finished)
+        map.finalize();
+    const auto address = 1040u + 258u * 4u;
+    CHECK(map.mmio_write(address, 77).success() && words.at(1, 7).ref() == 77);
+    CHECK(map.mmio_read_sized(address, 2) == 77);
+    for (auto invalid : {260, -1, -2}) {
+        output = invalid;
+        const auto result = map.mmio_write(address, 91);
+        CHECK(result.result == (invalid == -2 ? reg::RegMemTxResult::DeviceError
+                                              : reg::RegMemTxResult::AccessError));
+    }
+    CHECK(calls == 5 && words.at(1, 7).ref() == 77 && words.at(1, 258).ref() == 0);
+}
+
+struct BothResolverForms {
+    unsigned& rich;
+    unsigned& light;
+    std::uint32_t operator()(const reg::RegAccessInfo& i) {
+        ++rich;
+        return i.index_as(L);
+    }
+    std::uint32_t operator()(std::uint32_t, reg::RegData) {
+        ++light;
+        return 0;
+    }
+};
+void prefer_existing_signature() {
+    reg::RegisterBank<Device<true>> bank(reg::space(128));
+    bank.map().set_identity_resolver(Route, [](const auto& r) {
+        return r.request_id;
+    });
+    unsigned rich = 0, light = 0;
+    bank.map().set_access_resolver(P, BothResolverForms{rich, light});
+    bank.finish();
+    CHECK(bank.map().mmio_write(4, 17).success());
+    CHECK(bank->vf[0].X.at(1).ref() == 17 && rich == 1 && light == 0);
+}
+
 void registration_from_callback_is_rejected() {
     reg::RegisterBank<Device<true>> b(reg::space(128));
     auto& m = b.map();
@@ -184,6 +300,14 @@ int main() try {
                 exercise<false>(width, hook, throwing);
                 exercise<true>(width, hook, throwing);
             }
+    for (bool finished : {false, true}) {
+        light_without_identity({}, finished);
+        light_without_identity(7u, finished);
+        for (bool light : {false, true})
+            for (unsigned width : {1u, 2u, 4u})
+                index_observation(finished, light, width);
+    }
+    prefer_existing_signature();
     registration_from_callback_is_rejected();
     std::cout << "PASS: fixed resolver ownership, pre-finish replacement, frozen bindings, "
                  "mutable results, exceptions, full/frame paths and snapshot restore\n";

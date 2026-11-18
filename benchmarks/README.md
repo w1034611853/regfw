@@ -35,6 +35,14 @@ python3 benchmarks/measure_routes.py --baseline-prefix "$RESULTS/baseline" \
 
 默认测量包含 24 个场景：四种映射组合的无钩子/全局钩子读写（10 范围），以及双映射下的 1/100 范围敏感性对照。CPU/引用计数/进程配对规则与 `measure_hooks.py` 相同。不同功能组合的差额包含执行路径变化，不能当作严格可相加的单个函数耗时。可用 `--pairs 1-0 1-1 --ranges 10` 仅测 identity-only / 双转换的 8 个场景；两种 prefix 指向同一组二进制即可做 A/A 对照。
 
+要测 index resolver 签名的影响，在同一版本上把上述 `0-1` 和 `1-1` 各编译两次。`-DREGFW_BENCH_LIGHT_INDEX=0` 使用完整 `RegAccessInfo`，`-DREGFW_BENCH_LIGHT_INDEX=1` 使用 VF 和逻辑下标两个参数。两者共用路由表、范围校验和读写校验。分开保存为 `full-0-1`、`light-0-1` 等，再运行：
+
+```sh
+python3 benchmarks/measure_routes.py --baseline-prefix "$RESULTS/full" \
+  --candidate-prefix "$RESULTS/light" --pairs 0-1 1-1 --ranges 10 \
+  --blocks 5 --passes 5 --out "$RESULTS/index-signature"
+```
+
 ## 分发查表与采样
 
 查表优化、剩余差距定位及编译成本见 [Performance-Dispatch.md](../docs/Performance-Dispatch.md)。`measure_routes.py --ranges 10` 测全部四种转换组合的 16 个读写/hook 场景。

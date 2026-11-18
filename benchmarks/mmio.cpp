@@ -26,6 +26,9 @@
 #ifndef REGFW_BENCH_INDEX
 #define REGFW_BENCH_INDEX 1
 #endif
+#ifndef REGFW_BENCH_LIGHT_INDEX
+#define REGFW_BENCH_LIGHT_INDEX 0
+#endif
 constexpr unsigned COUNT = 1000, DIRECT = 700, GROUPS = 30, INDICES = 10, VFS = 8;
 constexpr std::uint64_t A = 0xff71f0000000ULL, B = 0xc100000000ULL;
 constexpr std::uint64_t VF_BASE = 0x100000, VF_STRIDE = 0x10000, SPACE_SIZE = 0x180000;
@@ -192,16 +195,22 @@ struct Framework {
                 throw std::runtime_error("physical VF range");
             return p;
         });
-        bank.map().set_access_resolver(PhysicalIndex, [this](const reg::RegAccessInfo& i) {
-            auto v = REGFW_BENCH_IDENTITY ? i.resolved_id() : i.request_id_or_instance().value();
-            auto q = i.index_as(LogicalIndex);
+        auto convert_index = [this](std::uint32_t v, reg::RegData q) {
             if (v >= VFS || q >= INDICES)
                 throw std::runtime_error("index range");
             auto p = tables.index[v][q];
             if (p >= INDICES)
                 throw std::runtime_error("physical index range");
             return p;
+        };
+#if REGFW_BENCH_LIGHT_INDEX
+        bank.map().set_access_resolver(PhysicalIndex, convert_index);
+#else
+        bank.map().set_access_resolver(PhysicalIndex, [convert_index](const reg::RegAccessInfo& i) {
+            auto v = REGFW_BENCH_IDENTITY ? i.resolved_id() : i.request_id_or_instance().value();
+            return convert_index(v, i.index_as(LogicalIndex));
         });
+#endif
         if (cb) {
             for (unsigned i = 0; i < build_direct; ++i) {
                 auto& r = bank->direct[i].VALUE;
@@ -651,7 +660,8 @@ int main(int argc, char** argv) {
     if (range_groups != 1 && range_groups != 10 && range_groups != 100)
         throw std::runtime_error("REGFW_BENCH_RANGES must be 1/10/100");
     std::cout << "RANGE_GROUPS " << range_groups << " IDENTITY " << REGFW_BENCH_IDENTITY
-              << " INDEX " << REGFW_BENCH_INDEX << '\n';
+              << " INDEX " << REGFW_BENCH_INDEX << " LIGHT_INDEX " << REGFW_BENCH_LIGHT_INDEX
+              << '\n';
     if (hook_mode != "none" && hook_mode != "global" && hook_mode != "view" && hook_mode != "both")
         throw std::runtime_error("REGFW_BENCH_PRE_ACCESS must be none/global/view/both");
     std::cout << "PRE_ACCESS " << hook_mode << '\n';

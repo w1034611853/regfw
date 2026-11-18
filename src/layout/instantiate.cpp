@@ -7,7 +7,7 @@ void Groups::apply_index(const detail::StaticIndexRule& rule,
     if (!coordinate)
         throw RegAccessDeriveError::device_error("coordinate dimension missing");
     info.index_fields.insert(rule.source, rule.source_name, *coordinate, rule.dimension);
-    const auto value = slot(info);
+    const auto value = slot(info, *coordinate);
     info.mapped_fields.insert(rule.output, rule.output_name, value, rule.dimension);
 }
 void Groups::install_index(detail::EntityState* node, detail::StaticIndexRule rule) {
@@ -65,7 +65,7 @@ void Groups::Plan::run(RegAccessInfo& info) const {
             info.mapped_fields.entries.activate();
             info.index_fields.entries[0] = {c.id, c.name, *v, c.dimension};
             info.index_fields.size = 1;
-            const auto value = (*d.resolver_slot)(info);
+            const auto value = (*d.resolver_slot)(info, *v);
             info.mapped_fields.entries[0] = {d.output,
                                              d.output_name,
                                              value,
@@ -83,18 +83,18 @@ void Groups::Plan::run(RegAccessInfo& info) const {
     }
     for (const auto& p : derivations) {
         const auto& d = *p;
+        const auto* source = info.index_fields.get(d.source);
+        if (!source || !source->dimension)
+            throw RegAccessDeriveError::device_error("missing derivation source coordinate");
         RegData value;
         if (!d.condition || d.condition(info))
-            value = d.resolver_slot ? (*d.resolver_slot)(info) : d.resolver(info);
+            value = d.resolver_slot ? (*d.resolver_slot)(info, source->value) : d.resolver(info);
         else {
             auto f = info.index_fields.get(d.fallback);
             if (!f)
                 throw RegAccessDeriveError::device_error("missing derivation fallback coordinate");
             value = f->value;
         }
-        auto source = info.index_fields.get(d.source);
-        if (!source || !source->dimension)
-            throw RegAccessDeriveError::device_error("missing derivation source coordinate");
         info.mapped_fields.insert(
             d.output, d.output_name, value, d.metadata_only ? std::nullopt : source->dimension);
     }

@@ -43,7 +43,17 @@ bank.finish(); // 绑定完设备逻辑后再校验并冻结布局。
 
 实体定义中的 `REG_ACCESS_GROUP(POOLS)` 指定 `QUEUE` 的第 1 维参与转换；第 0 维保持不变。只有命中 `identity_domain(VF_DOMAIN)` 时才调用 resolver，否则使用声明的 passthrough。`info.index_as(LogicalPool)` 取得请求下标。添加其他数组成员时，同组成员的维度语义必须一致。
 
-resolver 必须在 `finish()` 前绑定；确需晚绑定可先 `defer_identity_resolver(key)` 或 `defer_access_resolver(key)`，未绑定期间相关访问返回 DeviceError。可以在 finish 后替换/清除绑定；window 保存的是稳定函数槽。`has_identity_resolver(key)` / `clear_identity_resolver(key)` 可查询与清除对应槽。
+如果下标转换只依赖 VF 和逻辑下标，可以在 `finish()` 前用双参数回调绑定同一个 key。例如设备持有 `pool_map` 时可写成
+
+```cpp
+map.set_access_resolver(PhysicalPool, [&](std::uint32_t vf, reg::RegData logical) {
+    return pool_map.at(vf).at(logical);
+});
+```
+
+`vf` 取 identity resolver 的有效编号。没有 identity 时取来源实例编号，独立寄存器没有实例编号时取 0。`logical` 是当前规则声明的源坐标值。每次命中规则都会重新调用 resolver，因此设备更新 `pool_map` 后下一次访问就能看到新结果。依赖读写方向、旧值、请求身份等信息的 resolver 继续接收 `const reg::RegAccessInfo&`。后续 pre_access 和寄存器回调可以独立使用完整 info。
+
+在这个同步分支上，`finish()` 校验必需的绑定并冻结全部绑定，之后注册、替换或清除 resolver 都会抛出 `Configuration` 异常。
 
 命令与门铃均为 REG 实体，通过 bank 成员绑定普通回调；未声明地址返回 DecodeError，无回调时沿用寄存器 behavior。
 
