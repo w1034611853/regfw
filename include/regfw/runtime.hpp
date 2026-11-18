@@ -38,9 +38,8 @@ struct ScalarAccessSite {
     std::uint64_t target{};
     AccessRoute route;
     AliasAccessPolicy policy;
-    std::optional<std::uint32_t> instance, callback_instance;
+    std::optional<std::uint32_t> instance;
     std::string_view view_name;
-    const RegElementIndex* callback_index{};
     bool used{};
 };
 struct ScalarAccessFrame;
@@ -114,18 +113,17 @@ struct ScalarAccessFrame {
     REGFW_DETAIL_ALWAYS_INLINE void fill_scalar(RegAccessInfo& i) const {
         i.kind = kind;
         i.address = address;
-        i.alias_resolved_address = i.resolved_address =
-            prepared_index ? prepared_target : site->target;
+        i.alias_resolved_address = i.resolved_address = prepared_target;
         i.size = 4;
         i.register_width_bits = 32;
         i.bus_mask = 0xffffffff;
-        i.request_index = i.index = *(prepared_index ? prepared_index : site->callback_index);
+        i.request_index = i.index = *prepared_index;
         i.raw_data = i.bus_data = raw;
         i.stored_before = before;
         i.stored_after = after;
         i.route = site->route;
         i.alias_access_policy = site->policy;
-        i.source_instance = site->callback_instance;
+        i.source_instance = site->instance;
         i.view_path = site->view_name;
         i.is_alias = site->used;
     }
@@ -890,7 +888,6 @@ class RegisterMap {
     // the per-word tables were removed. Installed by install_formula_layout
     // and the dynamic AddressSpace compiler alike.
     std::unique_ptr<detail::FormulaDecoder> formula_;
-    bool compiled_view_mode_{};
     bool direct_scalar_mode_{};
     std::vector<LayoutWarning> mapping_warnings_;
     std::vector<std::unique_ptr<std::string>> compiled_names_;
@@ -974,8 +971,10 @@ class RegisterMap {
     AliasEntry
     walk_alias(std::uint64_t original, unsigned size, std::vector<AliasHop>* hops = nullptr) const;
     AliasEntry resolve_static(std::uint64_t address, unsigned size) const;
-    // Selected view entry for an address: formula decode or the word table.
-    const AliasEntry* view_entry(std::uint64_t address, AliasEntry& scratch) const;
+    inline AccessIdentity
+    resolve_identity(const detail::IdentityWindow& window,
+                     const IdentityResolveRequest& request,
+                     std::source_location at = std::source_location::current()) const;
     AddressResolution resolve_metadata(std::uint64_t address, unsigned size);
     Resolution& resolve(std::uint64_t address,
                         unsigned size,
@@ -995,17 +994,13 @@ class RegisterMap {
     std::optional<RegData> fast_scalar_resolved(Resolution& r, bool writing);
     template <bool Writing, class Selection>
     RegMmioReadResult mapped_scalar(std::uint64_t address, RegData value, const Selection& source);
-    RegData scalar32_events(const Entry& e,
-                            RegAccessInfo& info,
-                            const AccessIdentity* identity,
-                            bool writing);
     void validate_access(const Resolution& r) const;
     void derive(Resolution& r);
     std::optional<RegMemTxResult> prepare(Resolution& r);
     bool pre(Resolution& r);
     template <class Context>
     bool pre(const Node& node, const detail::ViewPreAccessChain* chain, const Context& context);
-    bool access_log_enabled(const Node&) const noexcept;
+    HLogLevel access_log_level(const Node&) const noexcept;
     void
     access_log(const Resolution& r, RegData value, std::string_view action = {}) const noexcept;
     void log_error(std::string_view phase,

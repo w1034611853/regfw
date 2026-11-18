@@ -54,8 +54,7 @@ std::string RegisterMap::explain_address(std::uint64_t address,
         std::vector<AliasHop> hops;
         auto trace = [&](std::uint64_t from) {
             hops.clear();
-            auto alias =
-                compiled_view_mode_ ? resolve_static(from, size) : walk_alias(from, size, &hops);
+            auto alias = formula_ ? resolve_static(from, size) : walk_alias(from, size, &hops);
             if (alias.compiled) {
                 out << "  -> VIEW " << alias.view_name << " priority=" << alias.priority << ": "
                     << hex(from) << " -> " << hex(alias.target) << '\n';

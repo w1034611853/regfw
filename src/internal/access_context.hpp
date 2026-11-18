@@ -17,9 +17,6 @@ struct RegisterMap::AliasHop {
     const detail::AddressWindow* window;
 };
 struct RegisterMap::AliasEntry : detail::ScalarAccessSite {
-    using Execute = Resolution& (
-        RegisterMap::*)(std::uint64_t, unsigned, RegTransactionKind, RegData, const AliasEntry*);
-    Execute execute{};
     std::uint64_t available{};
     std::string_view name;
     bool defined{true};

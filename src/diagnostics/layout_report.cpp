@@ -441,7 +441,7 @@ std::size_t RegisterMap::register_layout_scope(std::uint64_t base,
 
 std::string RegisterMap::describe_layout(LayoutDetail detail) const {
     require_initialized();
-    if (compiled_view_mode_) {
+    if (formula_) {
         std::ostringstream out;
         out << "COMPOSED ENTITY / VIEW LAYOUT (static; resolvers are not executed)\n";
         out << "Rows describe address views; entity: names referenced storage, not a new "

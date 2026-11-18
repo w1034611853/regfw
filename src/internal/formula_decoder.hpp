@@ -304,9 +304,7 @@ class FormulaDecoder {
                                           AccessRoute{scope.route, scope.instance.value_or(0)},
                                           scope.policy,
                                           scope.instance,
-                                          scope.instance,
                                           scope.name,
-                                          nullptr,
                                           binding.canonical_base != mount.base},
                                          &mount,
                                          &binding,
@@ -423,16 +421,6 @@ class FormulaDecoder {
         }
         return winner != nullptr;
     }
-    const Mount* find_entity_hash(std::uint64_t word,
-                                  std::uint32_t& linear,
-                                  std::uint32_t& byte) const noexcept {
-        PreparedHit hit{};
-        if (!lookup_prepared(word, hit))
-            return nullptr;
-        linear = hit.access->linear;
-        byte = hit.access->byte;
-        return hit.context->mount;
-    }
     bool find_prepared(std::uint64_t word, PreparedHit& hit) const noexcept {
         if (!lookup_prepared(word, hit))
             return false;
@@ -451,32 +439,6 @@ class FormulaDecoder {
   public:
     FormulaDecoder() = default;
 
-  private:
-    // Decode an offset inside one mount. Dense tilings (occupied is always a
-    // power of two bytes) resolve with one shift/mask pair from the inlined
-    // mount traits, exactly matching formula_decode_offset's Dense/Scalar
-    // branches; every other shape defers to the shared array table. The
-    // caller guarantees offset < mount end - base, so the span guard inside
-    // formula_decode_offset is subsumed for dense shapes.
-    // Only used for installing redirects and verifying element continuity.
-    // Ordinary MMIO already has the full prepared access context.
-    const Mount*
-    find_mount(std::uint64_t word, std::uint32_t& linear, std::uint32_t& byte) const noexcept {
-        const Mount* found = find_entity_hash(word, linear, byte);
-        if (!found || reserves_.empty())
-            return found;
-        for (const auto& r : reserves_) {
-            if (word < r.base)
-                break;
-            if (word >= r.end)
-                continue;
-            if (compare(r.scope, found->scope) >= 0)
-                return nullptr;
-        }
-        return found;
-    }
-
-  public:
     // One prepared Hash hit supplies the REG address, all coordinates, and a
     // per-View binding context. Construct only the *per-request* AliasEntry;
     // policy, pre-access, route, instance and callback-slot ownership were
@@ -495,9 +457,9 @@ class FormulaDecoder {
         if (out.available > 4) {
             // View overlap/reserve can interrupt an otherwise continuous
             // wide register. Validate only this rare, multi-word case.
-            std::uint32_t next_linear = 0, next_byte = 0;
-            const auto* next = find_mount(word + 4, next_linear, next_byte);
-            if (next != &mount || next_linear != info.linear || next_byte != info.byte + 4)
+            PreparedHit next{};
+            if (!find_prepared(word + 4, next) || next.context->mount != &mount ||
+                next.access->linear != info.linear || next.access->byte != info.byte + 4)
                 out.available = 4;
         }
         out.route = bound.route;
@@ -506,14 +468,11 @@ class FormulaDecoder {
         out.view_name = bound.view_name;
         out.pre_access_chain = bound.pre_access_chain;
         out.priority = bound.priority;
-        out.identity_index.reset();
         out.name = {};
-        if (bound.identity_index != STATIC_NONE) {
-            const auto index = bound.identity_index;
-            out.identity_index = index;
-            out.execute = &RegisterMap::resolve_plan<2>;
-        } else
-            out.execute = &RegisterMap::resolve_plan<1>;
+        if (bound.identity_index != STATIC_NONE)
+            out.identity_index = bound.identity_index;
+        else
+            out.identity_index.reset();
         if (!out.target_entry)
             out.target_entry.emplace();
         auto& entry = *out.target_entry;
@@ -523,8 +482,6 @@ class FormulaDecoder {
         entry.source_instance = bound.instance;
         entry.view = bound.node_layout;
         entry.precomputed_index = &info.index;
-        out.callback_index = &info.index;
-        out.callback_instance = bound.instance;
     }
     // Dynamic (AddressSpace/RegView) layouts use the same decoder as compiled
     // static layouts. The compiler emits one pattern mount per mapped REG
@@ -661,15 +618,6 @@ class FormulaDecoder {
     // winner context, in ascending address order.
     template <class F>
     void for_each_word(F f) const;
-    std::size_t mount_count() const noexcept {
-        return mounts_.size();
-    }
-    std::size_t zone_count() const noexcept {
-        return 0;
-    }
-    std::size_t binding_count() const noexcept {
-        return bindings_.size();
-    }
     friend class FormulaInstaller;
 };
 template <class F>

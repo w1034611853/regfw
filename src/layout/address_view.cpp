@@ -251,7 +251,7 @@ class ViewCompiler {
         map_.lookup_.for_each([&](auto, const auto&) {
             legacy = true;
         });
-        if (legacy || map_.compiled_view_mode_)
+        if (legacy || map_.formula_)
             fail("AddressSpace requires a fresh storage-only entity layout");
         for (std::size_t id = 0; id < flat_.size(); ++id) {
             const auto& f = flat_[id];
@@ -719,7 +719,6 @@ class ViewCompiler {
         map_.view_pre_access_chains_.swap(pre_chains);
         map_.mapping_warnings_ = std::move(warnings);
         map_.formula_ = std::move(decoder);
-        map_.compiled_view_mode_ = true;
     }
 
   public:

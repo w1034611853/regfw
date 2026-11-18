@@ -398,7 +398,7 @@ class FormulaInstaller {
         map.lookup_.for_each([&](auto, const auto&) {
             legacy = true;
         });
-        if (legacy || map.compiled_view_mode_ || plan.scopes.empty())
+        if (legacy || map.formula_ || plan.scopes.empty())
             throw Error("static layout requires fresh storage-only entities",
                         ErrorKind::Configuration);
         std::vector<EntityState*> nodes;
@@ -581,7 +581,6 @@ class FormulaInstaller {
         map.compiled_names_.swap(names);
         map.view_pre_access_chains_.swap(chains);
         map.formula_ = std::move(decoder);
-        map.compiled_view_mode_ = true;
     }
 
   private:
