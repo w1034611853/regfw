@@ -461,6 +461,8 @@ void RegisterMap::finalize() {
     }
     if (formula_)
         formula_->prepare_fast_paths();
+    direct_scalar_mode_ = !formula_ && windows_.empty() && identities_.empty() &&
+                          view_policies_.empty() && reserved_.empty() && instances_.empty();
     lookup_.freeze();
     aliases_.freeze();
     finalized_ = true;

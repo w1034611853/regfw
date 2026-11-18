@@ -1,5 +1,7 @@
 # 0.37 单线程原生句柄优化
 
+本页保留上一轮句柄优化的测量记录；最新 MMIO 回调优化和更新分支见 [Performance-MMIO-Scalar](Performance-MMIO-Scalar.md)。
+
 本分支从无异步的 `cec42e1f3a25bd8804129ff4c349a0dd54128742` 派生，面向单线程、固定生命周期的 QEMU SysBus 设备。没有合并 main，不包含异步队列、执行器或端点。此前 MMIO 钩子及分发表优化也已经回移；其测量记录见 [钩子报告](Performance-Hooks.md) 和 [查表报告](Performance-Dispatch.md)。
 
 ## 改动

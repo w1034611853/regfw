@@ -1,6 +1,6 @@
 # regfw 0.37.0
 
-本分支基于 **0.37.0，无异步队列**，面向单线程 QEMU 设备，优化原生 `.at()` 访问和 MMIO 分发。前端 API 不变；头文件与库需配套重新编译。分支说明、性能结果和更新步骤见 [Performance-Handles](docs/Performance-Handles.md)。
+本分支基于 **0.37.0，无异步队列**，面向单线程 QEMU 设备，优化原生 `.at()` 访问和 MMIO 分发。前端 API 不变；头文件与库需配套重新编译。最新回调与按需 info 优化、性能结果和更新步骤见 [Performance-MMIO-Scalar](docs/Performance-MMIO-Scalar.md)，此前句柄优化见 [Performance-Handles](docs/Performance-Handles.md)。
 
 **Production backend: runtime-built shared EntityLayout Hash.** Existing REG,
 REG_LAYOUT, REG_LAYOUT_IMPL, View/Repeat, resolver, callback, transaction and

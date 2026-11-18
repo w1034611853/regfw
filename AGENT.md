@@ -2,7 +2,9 @@
 
 代码导航见 [模块架构](docs/Architecture.zh-CN.md) 和 [私有实现目录](src/README.md)。`include/regfw/` 是稳定公开入口，`src/internal/` 不对外安装。本分支基于无异步的 0.37，保留前端 API，优化 MMIO 分发及单线程原生 RegView 访问。头文件与库必须配套重编译。
 
-此分支专用于单线程设备。RegView 的复制、销毁和访问及 Bank 生命周期也必须串行化：句柄使用普通引用计数，不提供并发引用计数保证。布局/Bundle 的冷路径仍使用 weak_ptr；访问回调和 RegAccessInfo 的语义不变。见 [原生句柄性能](docs/Performance-Handles.md)、[MMIO 钩子](docs/Performance-Hooks.md) 和 [分发查表](docs/Performance-Dispatch.md)。
+此分支专用于单线程设备。RegView 的复制、销毁和访问及 Bank 生命周期也必须串行化：句柄使用普通引用计数，不提供并发引用计数保证。布局/Bundle 的冷路径仍使用 weak_ptr；访问回调和 RegAccessInfo 的语义不变。最新优化见 [MMIO 回调与按需上下文](docs/Performance-MMIO-Scalar.md)，此前结果见 [原生句柄性能](docs/Performance-Handles.md)、[MMIO 钩子](docs/Performance-Hooks.md) 和 [分发查表](docs/Performance-Dispatch.md)。
+
+普通 scalar 回调借用挂载时准备的元数据；无参回调跳过 info 构造，其余回调在模板适配器中按实际使用优化。完整 info 的字段及复制语义不变。index resolver 的帧入口仅由 mapped 执行器调用，直接构造 mapped info，避免混入 scalar 装配影响优化。直接根 Bundle 在 finish 后、无 alias/identity/reserve/入口策略/instance window 时也可使用 scalar 执行器；不自动 finalize，不缓存动态钩子或 logger 开关。
 
 当前生产后端是 **View Range → Shared EntityLayout Dense/Hash → Prepared AccessInfo → Existing Access Engine**。`REG_LAYOUT` 接口、REG DSL、MMIO、Resolver/PreAccess、Transaction、Callbacks、Snapshot、Reset 均保持原有行为。运行时的几何计划仅构建一次（按布局类型的函数局部静态对象）；每个 Bank 安装独立的 Entity storage 与访问上下文，共享 View 内地址映射形状。
 

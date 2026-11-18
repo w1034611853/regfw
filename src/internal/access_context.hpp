@@ -43,6 +43,10 @@ struct RegisterMap::InstanceWindow {
 struct RegisterMap::CompiledAccess {
     const AliasEntry* metadata{};
     Node* node{};
+    const detail::ScalarAccessSite* scalar_site{};
+    const RegElementIndex* scalar_index{};
+    std::uint64_t scalar_target{};
+    std::uint32_t linear{};
     std::byte* scalar{};
     std::uint32_t mask{};
     std::uint8_t directions{}, mapped_directions{};
@@ -69,6 +73,7 @@ struct RegisterMap::AccessScratch {
     // identity RedirectBank target. Both live only within one dispatch.
     RegisterMap::AliasEntry decoded[2]{};
     RegisterMap::CompiledAccess decoded_access{};
+    detail::ScalarAccessSite direct_site{};
     AccessScratch() {
         resolution.info.index_fields.borrow(index);
         resolution.info.mapped_fields.borrow(mapped);
