@@ -101,3 +101,5 @@ done
 - `handles.cpp` / `measure_handles.py`：原生指针、`.at(i).bits`、`.at(i).ref()` 对照；构建和配对命令见 [Performance-Handles](../docs/Performance-Handles.md)。
 - `measure_hooks.py` / `measure_routes.py`：pre_access 与 identity/index 组合，见 [Performance-Hooks](../docs/Performance-Hooks.md)。
 - `sample_ips.cpp` / `summarize_ips.py`：可选 Linux x86_64 IP 采样，诊断结果见 [Performance-Dispatch](../docs/Performance-Dispatch.md)；正式计时不链接采样器。
+
+- `snapshot_stream.cpp`：9 实例×2048 独立 u32，或 9×65536 u32 数组，真实 bank Writer/Reader 内存流及恢复校验。编译需 `-Iextras -Itests/snapshot_backend`，仅基准使用测试后端头；命令与结果见 [固定生命周期与快照测量](../docs/Performance-Fixed-Lifetime.md)。

@@ -66,8 +66,7 @@ struct RegisterMap::Resolution {
 };
 struct RegisterMap::AccessScratch {
     RegAccessFieldSet::FieldArray::Array index, mapped;
-    // One synchronous access at a time: DispatchGuard rejects same-map
-    // reentry before either reusable context can be touched.
+    // The fixed device contract permits one non-reentrant access at a time.
     Resolution resolution{};
     // Formula decoding scratch: [0] holds the selected view entry, [1] the
     // identity RedirectBank target. Both live only within one dispatch.
@@ -90,27 +89,5 @@ struct RegisterMap::ResolverRegistry {
     std::unordered_map<const void*, std::shared_ptr<detail::AccessResolverSlot>> slots;
     std::unordered_map<const void*, std::shared_ptr<detail::IdentityResolverSlot>> identities;
     std::unordered_map<const void*, std::shared_ptr<detail::PreAccessSlot>> pre_access;
-};
-struct RegisterMap::PreAccessGuard {
-    RegisterMap& map;
-    explicit PreAccessGuard(RegisterMap& m) : map(m) {
-        map.pre_access_active_ = true;
-    }
-    ~PreAccessGuard() {
-        if (!map.retired_pre_access_.empty())
-            map.release_retired_pre_access();
-        map.pre_access_active_ = false;
-    }
-};
-struct RegisterMap::DispatchGuard {
-    RegisterMap& map;
-    explicit DispatchGuard(RegisterMap& m) : map(m) {
-        if (m.dispatching_)
-            throw Error("recursive MMIO on same map is unsupported");
-        m.dispatching_ = true;
-    }
-    ~DispatchGuard() {
-        map.dispatching_ = false;
-    }
 };
 } // namespace reg

@@ -10,6 +10,17 @@
                                      #__VA_ARGS__);                                                \
     } while (false)
 namespace {
+template <class F>
+void frozen(F&& f) {
+    bool caught = false;
+    try {
+        f();
+    } catch (const reg::Error& e) {
+        caught = e.kind == reg::ErrorKind::Configuration;
+    }
+    CHECK(caught);
+}
+
 constexpr std::uint64_t A = 0xff71f0000000ULL, B = 0xc100000000ULL;
 REG_PRE_ACCESS(ParentCheck);
 REG_PRE_ACCESS(EntryA);
@@ -150,19 +161,16 @@ void ordering_aliases_and_transactions() {
     CHECK(saved_index.request_id() == 0 && saved_index.resolved_id() == 1 &&
           saved_index.request_index.linear() == 0 && saved_index.index.linear() == 1 &&
           saved_index.index_as(Logical) == 0 && saved_index.mapped_as(Physical) == 1);
-    m.set_pre_access(EntryA, [](const auto&) {
-        events.push_back("A2");
+    frozen([&] {
+        m.set_pre_access(EntryA, [](const auto&) {});
     });
+    frozen([&] {
+        m.clear_pre_access(EntryA);
+    });
+    CHECK(m.has_pre_access(EntryA) && m.has_pre_access(EntryB) && m.has_pre_access());
     events.clear();
     (void)m.mmio_read(A + 0x200);
-    CHECK(events[1] == "A2");
-    m.clear_pre_access(EntryA);
-    CHECK(!m.has_pre_access(EntryA) && m.has_pre_access(EntryB) && m.has_pre_access());
-    events.clear();
-    CHECK(m.mmio_write(A + 0x200, 123).result == reg::RegMemTxResult::Ignored &&
-          b->vf[1].VALUE.ref() == 42);
-    CHECK(events == std::vector<std::string>({"G"}));
-    m.set_pre_access(EntryA, [](const auto&) {});
+    CHECK(events == std::vector<std::string>({"G", "A", "P", "C", "I1"}));
     events.clear();
     CHECK(m.mmio_write_sized(B + 0x202, 0xAABB, 2).success());
     CHECK(b->vf[1].VALUE.ref() == 0xAABB002A && m.mmio_read_sized(B + 0x202, 2) == 0xAABB);
@@ -206,12 +214,13 @@ void overlays_and_failures() {
     CHECK(ok.map().mmio_write(0, 7).success());
     CHECK(events == std::vector<std::string>({"P", "H"}) && ok->high.VALUE.ref() == 7 &&
           ok->low.VALUE.ref() == 0);
-    reg::RegisterBank<Overlay<1>> fail(reg::space(0x100).finalize());
+    reg::RegisterBank<Overlay<1>> fail(reg::space(0x100));
     unsigned callbacks = 0;
     fail->high.VALUE.on_write([&] {
         ++callbacks;
     });
     events.clear();
+    fail.finish();
     CHECK(fail.map().mmio_write(0, 7).result == reg::RegMemTxResult::Ignored);
     CHECK(events == std::vector<std::string>({"P", "H"}) && callbacks == 0 &&
           fail->high.VALUE.ref() == 0 && fail->low.VALUE.ref() == 0);
@@ -287,6 +296,18 @@ void scalar_hook_frames(bool finalized) {
         CHECK(value.ref() == 64 && correct);
     }
     CHECK(global_calls == 10 && view_calls == 10 && reads == 5 && writes == 5 && completed == 5);
+    if (finalized) {
+        frozen([&] {
+            m.set_pre_access(nullptr);
+        });
+        frozen([&] {
+            m.clear_pre_access();
+        });
+        frozen([&] {
+            m.clear_pre_access(Missing);
+        });
+        return;
+    }
     m.set_pre_access(nullptr);
     CHECK(m.mmio_write(0, 99).result == reg::RegMemTxResult::Ignored && value.ref() == 64);
     m.clear_pre_access();
@@ -294,45 +315,28 @@ void scalar_hook_frames(bool finalized) {
     m.set_pre_access(Missing, empty_hook);
     CHECK(m.mmio_read(0) == 0 && value.ref() == 64);
 }
-void self_rebinding_lifetimes() {
-    reg::RegisterBank<Unbound> b(reg::space(0x100));
-    auto& m = b.map();
+void fixed_hook_lifetime() {
     bool active = false, bad = false;
-    unsigned destroyed = 0, first = 0, second = 0;
-    auto probe = std::make_shared<LifetimeProbe>(active, bad, destroyed);
-    m.set_pre_access(Missing, [probe, &m, &active, &first, &second](const auto&) {
-        active = true;
-        ++first;
-        m.set_pre_access(Missing, [&second](const auto&) {
-            ++second;
+    unsigned destroyed = 0, calls = 0;
+    {
+        reg::RegisterBank<Unbound> b(reg::space(0x100));
+        auto& m = b.map();
+        auto probe = std::make_shared<LifetimeProbe>(active, bad, destroyed);
+        m.set_pre_access(Missing, [probe, &m, &active, &calls](const auto&) {
+            active = true;
+            ++calls;
+            frozen([&] {
+                m.clear_pre_access(Missing);
+            });
+            CHECK(probe->destroyed == 0);
+            active = false;
         });
-        (void)probe->destroyed;
-        active = false;
-    });
-    probe.reset();
-    b.finish();
-    CHECK(m.mmio_write(0, 1).success() && first == 1 && second == 0 && destroyed == 1 && !bad);
-    CHECK(m.mmio_write(0, 2).success() && second == 1);
-    probe = std::make_shared<LifetimeProbe>(active, bad, destroyed);
-    m.set_pre_access([probe, &m, &active](const auto&) {
-        active = true;
-        m.clear_pre_access();
-        (void)probe->destroyed;
-        active = false;
-    });
-    probe.reset();
-    CHECK(m.mmio_write(0, 3).success() && destroyed == 2 && !bad && !m.has_pre_access());
-    probe = std::make_shared<LifetimeProbe>(active, bad, destroyed);
-    m.set_pre_access(Missing, [probe, &m, &active](const auto&) {
-        active = true;
-        m.clear_pre_access(Missing);
-        (void)probe->destroyed;
-        active = false;
-        throw std::runtime_error("after clear");
-    });
-    probe.reset();
-    CHECK(m.mmio_write(0, 4).result == reg::RegMemTxResult::Ignored && destroyed == 3 && !bad &&
-          b->regs.VALUE.ref() == 3);
+        probe.reset();
+        b.finish();
+        CHECK(m.mmio_write(0, 1).success() && calls == 1 && destroyed == 0 && !bad);
+        CHECK(m.mmio_write(0, 2).success() && calls == 2 && destroyed == 0 && !bad);
+    }
+    CHECK(destroyed == 1 && !bad);
 }
 
 void binding_validation() {
@@ -345,10 +349,13 @@ void binding_validation() {
     }
     CHECK(rejected);
     b.map().defer_pre_access(Missing);
-    b.finish();
+    frozen([&] {
+        b.finish();
+    });
     CHECK(b.map().mmio_write(0, 1).result == reg::RegMemTxResult::Ignored &&
           b->regs.VALUE.ref() == 0);
     b.map().set_pre_access(Missing, [](const auto&) {});
+    b.finish();
     CHECK(b.map().mmio_write(0, 2).success() && b->regs.VALUE.ref() == 2);
     bool duplicate = false;
     try {
@@ -363,12 +370,12 @@ int main() try {
     ordering_aliases_and_transactions();
     overlays_and_failures();
     binding_validation();
-    self_rebinding_lifetimes();
+    fixed_hook_lifetime();
     scalar_hook_frames(false);
     scalar_hook_frames(true);
     std::cout << "PASS: selected View pre_access chains, global-parent-child order, aliases, "
                  "identity/index remap, holes/overlays, every-beat transactions, snapshot "
-                 "independence, exceptions and late binding\n";
+                 "independence, exceptions and frozen binding\n";
 } catch (const std::exception& e) {
     std::cerr << e.what() << '\n';
     return 1;

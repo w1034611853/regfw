@@ -758,6 +758,7 @@ void RegisterMap::bind_window_resolver(const void* key,
                                        std::string_view name,
                                        std::shared_ptr<const IdentityFn> callback,
                                        detail::CallbackDescription description) {
+    mutable_bindings();
     require_initialized();
     auto& slot = access_resolvers_->identities[key];
     if (!slot) {
@@ -769,6 +770,7 @@ void RegisterMap::bind_window_resolver(const void* key,
     emit_resolver_update("identity:" + slot->name, slot->description, bool(slot->callback));
 }
 void RegisterMap::clear_window_resolver(const void* key) {
+    mutable_bindings();
     require_initialized();
     auto it = access_resolvers_->identities.find(key);
     if (it != access_resolvers_->identities.end()) {

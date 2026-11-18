@@ -17,6 +17,7 @@ add_library(regfw STATIC
   src/runtime/lifecycle.cpp
   src/runtime/storage.cpp
   src/snapshot/snapshot.cpp
+  src/snapshot/compact.cpp
   src/snapshot/state.cpp
   src/diagnostics/errors.cpp
   src/diagnostics/inspection.cpp

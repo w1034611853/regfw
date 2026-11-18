@@ -32,22 +32,27 @@ struct Device : reg::Bundle {
             });
     });
 };
+REG_PRE_ACCESS(UnusedHook);
 struct Probe {
-    std::vector<int>& events;
-    int id;
-    std::function<void()> destroy;
-    Probe(std::vector<int>& e, int i, std::function<void()> d = {})
-        : events(e), id(i), destroy(std::move(d)) {
-    }
+    unsigned& destroyed;
     ~Probe() {
-        events.push_back(id);
-        if (destroy)
-            destroy();
+        ++destroyed;
     }
 };
+template <class F>
+void frozen(F action) {
+    bool rejected = false;
+    try {
+        action();
+    } catch (const reg::Error& e) {
+        rejected = e.kind == reg::ErrorKind::Configuration;
+    }
+    CHECK(rejected);
+}
 template <bool Named>
-void exercise(unsigned width, bool forced_generic, bool throwing) {
-    std::vector<int> events;
+void exercise(unsigned width, bool hook, bool throwing) {
+    unsigned destroyed = 0, index_calls = 0, writes = 0, reads = 0, hooks = 0;
+    bool fail = throwing, redirect = false;
     reg::RegisterBank<Device<Named>> b(reg::space(128));
     auto& m = b.map();
     auto bind_id = [&](auto f) {
@@ -62,123 +67,127 @@ void exercise(unsigned width, bool forced_generic, bool throwing) {
         else
             m.clear_identity_resolver();
     };
-    if (forced_generic)
-        m.set_pre_access([](const auto&) {});
-    unsigned index_calls = 0, writes = 0, reads = 0;
-    auto identity = std::make_shared<Probe>(events, 10);
+    // Configuration can replace a function before finish; no invocation retains it.
+    auto retired = std::make_shared<Probe>(destroyed);
+    bind_id([retired](const auto& r) {
+        return r.request_id;
+    });
+    retired.reset();
+    auto identity = std::make_shared<Probe>(destroyed);
     std::weak_ptr<Probe> identity_weak = identity;
-    bind_id([&, identity](const auto& request) {
-        clear_id();
+    bind_id([&, identity](const auto& r) {
         CHECK(!identity_weak.expired());
-        auto temporary = std::make_shared<Probe>(events, 11);
-        std::weak_ptr<Probe> weak = temporary;
-        bind_id([temporary](const auto& r) {
-            return r.request_id;
-        });
-        temporary.reset();
-        bind_id([](const auto& r) {
-            return r.request_id;
-        });
-        CHECK(weak.expired() && !identity_weak.expired());
-        events.push_back(12);
-        return request.request_id;
+        return r.request_id ^ unsigned(redirect);
     });
     identity.reset();
-    // Rebinding from a retiring callable's destructor must be safe too.
-    auto index = std::make_shared<Probe>(events, 20, [&] {
-        m.set_access_resolver(P, [](const auto& i) {
-            return i.index_as(L);
-        });
-    });
+    CHECK(destroyed == 1);
+    auto index = std::make_shared<Probe>(destroyed);
     std::weak_ptr<Probe> index_weak = index;
-    m.set_access_resolver(P, [&, index](const auto& i) -> std::uint32_t {
+    m.set_access_resolver(P, [&, index](const auto& i) {
         ++index_calls;
-        CHECK(identity_weak.expired());
-        m.clear_access_resolver(P);
         CHECK(!index_weak.expired());
-        auto temporary = std::make_shared<Probe>(events, 21);
-        std::weak_ptr<Probe> weak = temporary;
-        m.set_access_resolver(P, [temporary](const auto&) {
-            return 0u;
-        });
-        temporary.reset();
-        m.clear_access_resolver(P);
-        CHECK(weak.expired() && !index_weak.expired());
-        events.push_back(22);
-        if (throwing)
-            throw std::runtime_error("index self-clear failure");
+        if (fail)
+            throw std::runtime_error("index failure");
         return i.index_as(L);
     });
     index.reset();
-    b->vf[0].X.on_write([&] {
-        CHECK(index_weak.expired());
-        ++writes;
-    });
-    b->vf[0].X.on_read([&](std::uint32_t value, const auto&) {
-        CHECK(index_weak.expired());
-        ++reads;
-        return value;
-    });
-    // Do not use a global hook as a proxy for the generic engine: hooks can
-    // now use the scalar executor too.
-    if (!forced_generic)
-        b.finish();
-    auto result = m.mmio_write_sized(0, 37, width);
-    CHECK(result.result == (throwing ? reg::RegMemTxResult::DeviceError : reg::RegMemTxResult::Ok));
-    CHECK(identity_weak.expired() && index_weak.expired() && index_calls == 1 &&
-          writes == unsigned(!throwing));
-    CHECK((events == std::vector<int>{11, 12, 10, 21, 22, 20}));
-    CHECK(m.mmio_write_sized(0, 49, width).success() && writes == unsigned(!throwing) + 1);
-    CHECK(m.mmio_read_sized(0, width) == 49 && reads == 1 && index_calls == 1);
-    auto snapshot = b.save();
-    b.reset();
-    b.load(snapshot);
-    CHECK(m.mmio_read_sized(0, width) == 49);
-}
-void identity_exception(bool legacy) {
-    std::vector<int> events;
-    reg::RegisterMap m(128, "EXCEPTION");
-    auto a = m.create_reg<std::uint32_t>(0, "A"), b = m.create_reg<std::uint32_t>(64, "B");
-    (void)b;
-    reg::RegLayout layout(m);
-    layout.identity_repeat_window({0, 2, 64, 64}, 1, reg::IdentityRemapMode::RedirectBank);
-    auto p = std::make_shared<Probe>(events, 1);
-    std::weak_ptr<Probe> weak = p;
-    m.set_identity_resolver([&, p](const auto&) -> std::uint32_t {
-        m.clear_identity_resolver();
-        CHECK(!weak.expired());
-        throw std::runtime_error("self-clear identity");
-    });
-    p.reset();
-    m.finalize();
-    if (legacy)
-        CHECK(m.mmio_write(0, 10).result == reg::RegMemTxResult::DeviceError);
-    else {
-        bool failed = false;
-        try {
-            (void)m.resolve_address_with_identity(0, 4);
-        } catch (const reg::Error&) {
-            failed = true;
-        }
-        CHECK(failed);
+    if (hook)
+        m.set_pre_access([&](const auto&) {
+            ++hooks;
+        });
+    m.set_pre_access(UnusedHook, [](const auto&) {});
+    for (unsigned i = 0; i < 2; ++i) {
+        b->vf[i].X.on_write([&] {
+            ++writes;
+        });
+        b->vf[i].X.on_read([&](std::uint32_t value, const auto&) {
+            ++reads;
+            return value;
+        });
     }
-    CHECK(weak.expired() && events == std::vector<int>{1} && a.ref() == 0);
+    b.finish();
+    b.finish(); // Idempotent; it does not reopen registration.
+    frozen(clear_id);
+    frozen([&] {
+        bind_id([](const auto& r) {
+            return r.request_id;
+        });
+    });
+    frozen([&] {
+        m.clear_access_resolver(P);
+    });
+    frozen([&] {
+        m.set_access_resolver(P, [](const auto&) {
+            return 0u;
+        });
+    });
+    frozen([&] {
+        m.clear_pre_access();
+    });
+    frozen([&] {
+        m.set_pre_access([](const auto&) {});
+    });
+    frozen([&] {
+        m.clear_pre_access(UnusedHook);
+    });
+    frozen([&] {
+        m.set_pre_access(UnusedHook, [](const auto&) {});
+    });
+    frozen([&] {
+        b->vf[0].X.on_read_complete([] {});
+    });
+    auto first = m.mmio_write_sized(0, 37, width);
+    CHECK(first.result == (throwing ? reg::RegMemTxResult::DeviceError : reg::RegMemTxResult::Ok));
+    CHECK(writes == unsigned(!throwing) && destroyed == 1);
+    fail = false;
+    CHECK(m.mmio_write_sized(0, 49, width).success());
+    CHECK(m.mmio_read_sized(0, width) == 49 && reads == 1 && index_calls == 3);
+    redirect = true; // Frozen function bindings do not freeze resolver results.
+    CHECK(m.mmio_write_sized(0, 61, width).success());
+    CHECK(b->vf[1].X.at(0).ref() == 61 && b->vf[0].X.at(0).ref() == 49);
+    CHECK(hooks == (hook ? 4u - unsigned(throwing) : 0u));
+    auto saved = b.save();
+    b.reset();
+    b.load(saved);
+    CHECK(m.mmio_read_sized(0, width) == 61);
+    CHECK(!identity_weak.expired() && !index_weak.expired() && destroyed == 1);
+    b.clear();
+    CHECK(identity_weak.expired() && index_weak.expired() && destroyed == 3);
+}
+void registration_from_callback_is_rejected() {
+    reg::RegisterBank<Device<true>> b(reg::space(128));
+    auto& m = b.map();
+    unsigned rejected = 0;
+    m.set_identity_resolver(Route, [&](const auto& request) {
+        frozen([&] {
+            m.clear_identity_resolver(Route);
+        });
+        ++rejected;
+        return request.request_id;
+    });
+    m.set_access_resolver(P, [&](const auto& info) {
+        frozen([&] {
+            m.clear_access_resolver(P);
+        });
+        ++rejected;
+        return info.index_as(L);
+    });
+    b.finish();
+    CHECK(m.mmio_write(0, 77).success() && rejected == 2);
+    CHECK(m.mmio_read(0) == 77 && rejected == 4);
 }
 } // namespace
-int main() {
-    try {
-        for (unsigned width : {1u, 2u, 4u})
-            for (bool generic : {false, true})
-                for (bool throwing : {false, true}) {
-                    exercise<false>(width, generic, throwing);
-                    exercise<true>(width, generic, throwing);
-                }
-        identity_exception(true);
-        identity_exception(false);
-        std::cout << "PASS: resolver self-rebind/clear, immediate unrelated retirement, destructor "
-                     "rebind, exceptions, full/frame and legacy paths\n";
-    } catch (const std::exception& e) {
-        std::cerr << e.what() << '\n';
-        return 1;
-    }
+int main() try {
+    for (unsigned width : {1u, 2u, 4u})
+        for (bool hook : {false, true})
+            for (bool throwing : {false, true}) {
+                exercise<false>(width, hook, throwing);
+                exercise<true>(width, hook, throwing);
+            }
+    registration_from_callback_is_rejected();
+    std::cout << "PASS: fixed resolver ownership, pre-finish replacement, frozen bindings, "
+                 "mutable results, exceptions, full/frame paths and snapshot restore\n";
+} catch (const std::exception& e) {
+    std::cerr << e.what() << '\n';
+    return 1;
 }

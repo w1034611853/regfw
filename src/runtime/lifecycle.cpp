@@ -4,7 +4,6 @@
 #include <unordered_set>
 
 namespace reg {
-
 // RegisterMap lifetime and initialization.
 RegisterMap::RegisterMap() noexcept : lookup_(0), aliases_(0) {
 }
@@ -19,7 +18,7 @@ void RegisterMap::init(std::uint64_t size, std::string name, HLogLogger* logger)
     const auto checked_size = checked_map_size(size);
     detail::SparseLookup<Entry> next_lookup(checked_size);
     detail::SparseLookup<AliasEntry> next_aliases(checked_size);
-    auto next_life = detail::make_handle_lifetime();
+    auto next_life = std::make_shared<char>();
     auto next_resolvers = std::make_unique<ResolverRegistry>();
     auto next_scratch = std::make_unique<AccessScratch>();
     // Complete every allocation before publishing any initialized state.
@@ -133,33 +132,11 @@ void* EntityState::value_pointer(std::size_t index, const void* token) const {
         throw Error("register value type/index mismatch", ErrorKind::Configuration);
     return values->element(index);
 }
-void* checked_value_pointer(EntityState* node,
-                            std::size_t index,
-                            const void* token,
-                            const HandleLifetime& life,
-                            std::size_t rank,
-                            bool empty) {
-    if (!node || life.expired())
-        throw Error("register handle outlived its map");
-    node->check_borrow();
-    if (node->dims.size() != rank)
-        throw Error("typed handle rank mismatch");
-    if (empty) {
-        if (index > node->element_count() || node->values->type_token() != token)
-            throw Error("invalid empty register view", ErrorKind::Access);
-        return nullptr;
-    }
-    return node->value_pointer(index, token);
-}
-void* checked_value_pointer(EntityState* node,
-                            std::size_t index,
-                            const void* token,
-                            const std::shared_ptr<void>& life,
-                            std::size_t rank,
-                            bool empty) {
-    if (!node || !life)
-        throw Error("register handle outlived its map");
-    node->check_borrow();
+void* checked_value_pointer(
+    EntityState* node, std::size_t index, const void* token, std::size_t rank, bool empty) {
+    if (!node)
+        throw Error("register handle is not bound");
+
     if (node->dims.size() != rank)
         throw Error("typed handle rank mismatch");
     if (empty) {
@@ -397,7 +374,7 @@ void RegisterMap::map_routed_alias_window(std::uint64_t source,
 }
 
 void RegisterMap::clear_identity_resolver() {
-    require_initialized();
+    mutable_bindings();
     identity_resolver_.reset();
     emit_resolver_update("identity", identity_description_, false);
 }
@@ -407,8 +384,7 @@ bool RegisterMap::has_identity_resolver() const {
 }
 
 void RegisterMap::clear_pre_access() {
-    require_initialized();
-    retire_pre_access(pre_access_);
+    mutable_bindings();
     pre_access_.reset();
 }
 
@@ -450,8 +426,8 @@ void RegisterMap::finalize() {
                 cache(a);
     }
     validate_integrity();
-    // These properties cannot change after finish. Dynamic callbacks,
-    // hooks, logger state and borrow state are still checked per beat.
+    // Layout and callback bindings are fixed after finish. Logger state
+    // and the data consulted by callbacks remain live during each access.
     for (auto& n : nodes_) {
         if (n->scalar_data && n->value_size == 4 && !n->custom_behavior &&
             n->builtin == Access::Rw && n->widths.allows(4))

@@ -2,6 +2,16 @@
 
 ## 0.37.0
 
+**Synchronous fixed-lifetime performance branch (2026-11-18).**
+
+- Freeze resolver, pre_access and register callback bindings at `finish()`. Keep mutable routing data, logger levels and the existing callback signatures.
+- Remove RegView lifetime reference counting, per-access callable retention and borrow/reentry guards. Devices must keep banks alive and use them serially without same-map reentry.
+- Serialize banks in archive/QEMU streams as compact v1: layout hash, actual-width values and active transactions, without schema details. Preserve read-only device state and resumable transactions. The in-memory VersionedSnapshot v2 API remains available; old bank streams require explicit conversion or regeneration.
+- Provide optional bulk archive IO while retaining compatibility with archives exposing only operator(). Preserve the total byte budget and validate before committing restored state.
+- See [measurements and integration](docs/Performance-Fixed-Lifetime.md). No main-branch asynchronous queue changes are included.
+
+Original 0.37.0 release:
+
 **Readability / modularization release (no intended API or behavior changes).**
 
 - Apply a consistent, checked-in `.clang-format` style across first-party C++20 sources, examples, and tests; expand compressed statements and format callbacks and templates for review.

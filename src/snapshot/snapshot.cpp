@@ -1,4 +1,5 @@
 #include "internal/runtime_impl.hpp"
+#include "internal/snapshot_context.hpp"
 
 // Snapshot serialization, schema and restore operations.
 namespace reg {
@@ -61,43 +62,23 @@ SnapshotSchema RegisterMap::snapshot_schema() const {
 }
 
 std::uint64_t RegisterMap::snapshot_layout_hash(std::span<const SnapshotLayoutDesc> slots) {
-    std::uint64_t h = 0xcbf29ce484222325ull;
-    auto byte = [&](unsigned char b) {
-        h ^= b;
-        h *= 0x100000001b3ull;
-    };
-    auto le = [&](std::uint64_t value, unsigned bytes) {
-        for (unsigned i = 0; i < bytes; ++i)
-            byte(static_cast<unsigned char>(value >> (i * 8)));
-    };
-    le(SNAPSHOT_FORMAT_VERSION, 4);
-    le(slots.size(), 8);
-    for (const auto& s : slots) {
-        le(s.stable_id.size(), 8);
-        for (unsigned char c : s.stable_id)
-            byte(c);
-        le(s.order.has_value(), 1);
-        le(s.order.value_or(0), 4);
-        le(s.start_word, 8);
-        le(s.len_words, 8);
-        le(s.wide_width_bits, 4);
-        le(s.value_width_bits, 4);
-        le(s.dimensions.size(), 8);
-        for (auto d : s.dimensions)
-            le(d, 8);
-        le(s.strides.size(), 8);
-        for (auto stride : s.strides)
-            le(stride, 8);
-        le(s.transaction_read, 4);
-        le(s.transaction_write, 4);
-    }
-    return h;
+    detail::SnapshotLayoutHasher hash(slots.size());
+    for (const auto& s : slots)
+        hash.slot(s.stable_id,
+                  s.order,
+                  s.start_word,
+                  s.len_words,
+                  s.wide_width_bits,
+                  s.value_width_bits,
+                  s.dimensions,
+                  s.strides,
+                  s.transaction_read,
+                  s.transaction_write);
+    return hash.value();
 }
 
 VersionedSnapshot RegisterMap::dump_state_versioned() const {
     require_initialized();
-    if (dispatching_)
-        snapshot_error("cannot checkpoint a map during MMIO dispatch");
     VersionedSnapshot out;
     out.schema = snapshot_schema();
     out.data.resize(out.schema.total_words);
@@ -129,8 +110,6 @@ VersionedSnapshot RegisterMap::dump_state_versioned() const {
 
 void RegisterMap::restore_state_versioned(const VersionedSnapshot& snapshot) {
     require_initialized();
-    if (dispatching_)
-        snapshot_error("cannot restore a map during MMIO dispatch");
     const auto schema = snapshot_schema();
     if (snapshot.schema != schema)
         snapshot_error("snapshot version/hash/layout mismatch");
@@ -138,6 +117,15 @@ void RegisterMap::restore_state_versioned(const VersionedSnapshot& snapshot) {
         snapshot.runtime.size() != schema.slots.size())
         snapshot_error("snapshot data/runtime length mismatch");
     const auto nodes = snapshot_nodes();
+    restore_snapshot_payload(nodes, snapshot.data, snapshot.runtime);
+}
+
+void RegisterMap::restore_snapshot_payload(std::span<Node* const> nodes,
+                                           std::span<const RegData> data,
+                                           std::span<const SnapshotEntityRuntime> runtime) {
+    if (runtime.size() != nodes.size())
+        snapshot_error("snapshot runtime length mismatch");
+    std::size_t start_word = 0;
     struct Prepared {
         std::unique_ptr<detail::PreparedRestore> values;
         std::vector<detail::RegTransactionState> transactions;
@@ -148,13 +136,15 @@ void RegisterMap::restore_state_versioned(const VersionedSnapshot& snapshot) {
     // traffic. Swaps and value commits below cannot throw; view references stay valid.
     for (std::size_t slot = 0; slot < nodes.size(); ++slot) {
         auto& n = *nodes[slot];
-        n.check_borrow();
-        const auto& desc = schema.slots[slot];
-        const auto& saved = snapshot.runtime[slot];
+        const auto& saved = runtime[slot];
         const auto bits = n.value_size * 8, per = (bits + 63) / 64;
-        const auto data = std::span(snapshot.data).subspan(desc.start_word, desc.len_words);
+        const auto words = n.snapshot_words();
+        if (start_word > data.size() || words > data.size() - start_word)
+            snapshot_error("snapshot data length mismatch");
+        const auto values = data.subspan(start_word, words);
+        start_word += words;
         for (std::size_t i = 0; i < n.element_count(); ++i)
-            check_words(data.subspan(i * per, per), bits);
+            check_words(values.subspan(i * per, per), bits);
         Prepared next;
         next.transactions.resize(n.transaction_state.size());
         check_indices(saved.transactions, next.transactions.size());
@@ -185,9 +175,11 @@ void RegisterMap::restore_state_versioned(const VersionedSnapshot& snapshot) {
                 }
             }
         }
-        next.values = n.values->prepare_restore(data);
+        next.values = n.values->prepare_restore(values);
         staged.push_back(std::move(next));
     }
+    if (start_word != data.size())
+        snapshot_error("snapshot data length mismatch");
     for (std::size_t i = 0; i < nodes.size(); ++i) {
         staged[i].values->commit();
         nodes[i]->transaction_state.swap(staged[i].transactions);

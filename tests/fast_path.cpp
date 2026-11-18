@@ -9,6 +9,17 @@
                                      #__VA_ARGS__);                                                \
     } while (false)
 namespace {
+template <class F>
+void frozen(F&& f) {
+    bool caught = false;
+    try {
+        f();
+    } catch (const reg::Error& e) {
+        caught = e.kind == reg::ErrorKind::Configuration;
+    }
+    CHECK(caught);
+}
+
 constexpr std::uint64_t A = 0xff71f0000000ULL, B = 0xc100000000ULL, C = 0xc200000000ULL;
 struct Encoded {
     using Raw = std::uint32_t;
@@ -98,7 +109,6 @@ void equivalent() {
 }
 void callback_state_and_frames() {
     reg::RegisterBank<Layout> b(reg::space().name("FRAMES"));
-    b.finish();
     auto& m = b.map();
     auto& value = b->regs.VALUE;
     value.ref() = 100;
@@ -113,20 +123,19 @@ void callback_state_and_frames() {
         saved = i;
         return std::uint32_t(++calls);
     });
+    unsigned observed = 0;
+    b->regs.MASK.on_write([count = 0, &observed](const auto&) mutable {
+        observed = ++count;
+    });
+    b.finish();
     CHECK(m.mmio_read_sized(A, 1) == 1 && m.mmio_read(B) == 2 && m.mmio_read_sized(A, 2) == 3 &&
           info_ok);
     CHECK(saved.address == A && saved.size == 2 && saved.bus_mask == 0xffff);
     CHECK(m.mmio_read(B) == 4 && info_ok && saved.address == B && saved.size == 4 &&
           saved.bus_mask == 0xffffffff && saved.register_width_bits == 32 && saved.raw_data == 0);
     auto copy = saved;
-    m.set_pre_access([](const auto&) {});
     CHECK(m.mmio_read(A) == 5);
-    m.clear_pre_access();
     CHECK(m.mmio_read(B) == 6 && info_ok && copy.address == B && copy.size == 4);
-    unsigned observed = 0;
-    b->regs.MASK.on_write([count = 0, &observed](const auto&) mutable {
-        observed = ++count;
-    });
     m.mmio_write_sized(A + 4, 1, 1);
     CHECK(observed == 1);
     m.mmio_write(B + 4, 2);
@@ -134,59 +143,67 @@ void callback_state_and_frames() {
     m.mmio_write_sized(A + 4, 3, 2);
     CHECK(observed == 3);
     reg::RegisterBank<Layout> late(reg::space().name("COMPLETE"));
-    late.finish();
     unsigned complete = 0;
-    late->regs.VALUE.on_read([&, bound = false]() mutable {
-        if (!bound) {
-            late->regs.VALUE.on_read_complete([&](std::uint32_t value, const auto& i) {
-                if (value == 77 && i.stored_after == 0 && i.size == 4)
-                    ++complete;
-            });
-            bound = true;
-        }
+    late->regs.VALUE.on_read([] {
         return std::uint32_t(77);
     });
+    late->regs.VALUE.on_read_complete([&](std::uint32_t value, const auto& i) {
+        if (value == 77 && i.stored_after == 0 && i.size == 4)
+            ++complete;
+    });
+    late.finish();
     CHECK(late.map().mmio_read(A) == 77 && complete == 1);
     CHECK(late.map().mmio_read(B) == 77 && complete == 2);
 }
-void late_bindings() {
-    reg::RegisterBank<Layout> b(reg::space().name("LATE"));
-    b.finish();
+void fixed_bindings() {
+    reg::RegisterBank<Layout> b(reg::space().name("FIXED"));
     auto& m = b.map();
     auto& r = b->regs.VALUE;
-    CHECK(m.mmio_write(A, 5).success() && m.mmio_read(B) == 5);
     unsigned pre = 0, writes = 0, reads = 0, completed = 0;
-    bool info_ok = true;
+    bool info_ok = true, pre_enabled = true, observe_write = false, observe_read = false,
+         reject = false;
     m.set_pre_access([&](const reg::RegAccessInfo& i) {
+        if (reject)
+            throw std::runtime_error("reject");
+        if (!pre_enabled)
+            return;
         ++pre;
-        info_ok = info_ok && i.stored_before == 5;
+        info_ok &= i.stored_before == 5;
         r.ref() = 10;
     });
-    CHECK(m.mmio_read(A) == 10 && pre == 1 && info_ok);
-    m.clear_pre_access();
-    CHECK(m.mmio_write(B, 11).success() && pre == 1);
     r.on_write([&](std::uint32_t old, const auto& i) {
+        if (!observe_write)
+            return;
         ++writes;
-        info_ok = info_ok && old == 11 && i.stored_before == 11 && i.stored_after == 12;
+        info_ok &= old == 11 && i.stored_before == 11 && i.stored_after == 12;
     });
-    CHECK(m.mmio_write(A, 12).success() && writes == 1 && info_ok);
     r.on_read([&](std::uint32_t candidate, const auto&) -> std::optional<std::uint32_t> {
+        if (!observe_read)
+            return std::nullopt;
         ++reads;
-        info_ok = info_ok && candidate == 12;
+        info_ok &= candidate == 12;
         r.ref() = 42;
         return std::nullopt;
     });
     r.on_read_complete([&](std::uint32_t response, const auto&) {
+        if (!observe_read)
+            return;
         ++completed;
-        info_ok = info_ok && response == 12;
+        info_ok &= response == 12;
     });
+    b.finish();
+    r.ref() = 5;
+    CHECK(m.mmio_read(A) == 10 && pre == 1 && info_ok);
+    pre_enabled = false;
+    CHECK(m.mmio_write(B, 11).success() && pre == 1);
+    observe_write = true;
+    CHECK(m.mmio_write(A, 12).success() && writes == 1 && info_ok);
+    observe_read = true;
     CHECK(m.mmio_read(B) == 12 && r.ref() == 42 && reads == 1 && completed == 1 && info_ok);
-    m.set_pre_access([](const auto&) {
-        throw std::runtime_error("reject");
-    });
+    reject = true;
     CHECK(m.mmio_write(A, 99).result == reg::RegMemTxResult::Ignored && r.ref() == 42 &&
           writes == 1);
-    m.clear_pre_access();
+    reject = false;
     auto* logger = hlog_register_logger("fastcheck", "regfw-fast-path", HLOG_LEVEL_TRACE);
     CHECK(logger);
     m.set_logger(logger);
@@ -206,7 +223,6 @@ void late_bindings() {
 }
 void callback_errors_and_dynamic_logging() {
     reg::RegisterBank<Layout> b(reg::space().name("ERRORS"));
-    b.finish();
     auto& m = b.map();
     unsigned completed = 0;
     b->regs.VALUE.on_write([] {
@@ -218,23 +234,19 @@ void callback_errors_and_dynamic_logging() {
     b->regs.VALUE.on_read_complete([&] {
         ++completed;
     });
+    b.finish();
     CHECK(m.mmio_write(A, 7).result == reg::RegMemTxResult::Ok && b->regs.VALUE.ref() == 7);
     auto read = m.try_mmio_read_sized(A, 4);
     CHECK(read.result == reg::RegMemTxResult::Ok &&
           read.value == reg::REG_READ_CALLBACK_ERROR_MAGIC && completed == 0);
-    reg::RegMemTxResult recursive = reg::RegMemTxResult::Ok;
-    b->regs.MASK.on_write([&] {
-        recursive = m.try_mmio_read_sized(A + 4, 4).result;
-    });
-    CHECK(m.mmio_write(A + 4, 9).success() && recursive == reg::RegMemTxResult::DeviceError);
     reg::RegisterBank<Layout> dynamic(reg::space().name("DYNAMIC"));
-    dynamic.finish();
     auto* logger = hlog_register_logger("fastdynamic", "regfw-fast-dynamic", HLOG_LEVEL_TRACE);
     CHECK(logger);
     dynamic->regs.VALUE.on_read([&] {
         dynamic.map().set_logger(logger);
         return std::uint32_t(77);
     });
+    dynamic.finish();
     CHECK(dynamic.map().mmio_read(A) == 77);
     hlog_flush();
     char path[2048];
@@ -304,58 +316,53 @@ void identity_without_context(bool finalized) {
     CHECK(m.mmio_read(A + 4) == 0xa534a578);
     CHECK(m.mmio_write(C + 4, 0).result == reg::RegMemTxResult::Ignored &&
           b->vf[1].MASK.ref() == 0xa534a578);
-    // Bind consumers from the resolver: they must run on this very access.
+    reg::RegisterBank<IdentityLayout> hooked(reg::space().name("HOOKED_IDENTITY"));
+    auto& hm = hooked.map();
     reg::RegAccessInfo saved;
-    bool bound = false;
-    m.set_identity_resolver(Route, [&](const auto& req) {
-        b->vf[1].VALUE.ref() = 35;
-        if (!bound) {
-            m.set_pre_access([&](const reg::RegAccessInfo& i) {
-                ++pre;
-                saved = i;
-                b->vf[1].VALUE.ref() = 36;
-            });
-            bound = true;
-        }
+    unsigned phase = 0;
+    hm.set_identity_resolver(Route, [&](const auto& req) {
+        if (phase == 0)
+            hooked->vf[1].VALUE.ref() = 35;
+        if (phase == 2)
+            hooked->vf[1].VALUE.ref() = 50;
         return req.request_id ^ 1;
     });
-    CHECK(m.mmio_read(A) == 36 && pre == 1 && saved.stored_before == 35 &&
+    hm.set_pre_access([&](const reg::RegAccessInfo& i) {
+        if (phase != 0)
+            return;
+        ++pre;
+        saved = i;
+        hooked->vf[1].VALUE.ref() = 36;
+    });
+    hooked->vf[1].VALUE.on_read([&](std::uint32_t value, const reg::RegAccessInfo& i) {
+        if (phase != 1)
+            return value;
+        ++reads;
+        saved = i;
+        return value + 7;
+    });
+    hooked->vf[1].VALUE.on_write([&](std::uint32_t old, const reg::RegAccessInfo& i) {
+        if (phase != 2)
+            return;
+        ++writes;
+        CHECK(old == 50);
+        saved = i;
+    });
+    if (finalized)
+        hooked.finish();
+    CHECK(hm.mmio_read(A) == 36 && pre == 1 && saved.stored_before == 35 &&
           saved.request_id() == 0 && saved.resolved_id() == 1 && saved.size == 4 &&
           saved.address == A && saved.register_width_bits == 32 && !saved.wide_values);
     auto retained = saved;
-    m.clear_pre_access();
-    bound = false;
-    m.set_identity_resolver(Route, [&](const auto& req) {
-        if (!bound) {
-            b->vf[1].VALUE.on_read([&](std::uint32_t value, const reg::RegAccessInfo& i) {
-                ++reads;
-                saved = i;
-                return value + 7;
-            });
-            bound = true;
-        }
-        return req.request_id ^ 1;
-    });
-    CHECK(m.mmio_read(B) == 43 && reads == 1 && saved.address == B);
-    // A read callback does not require constructing context on a plain write.
-    CHECK(m.mmio_write(A, 42).success() && reads == 1 && b->vf[1].VALUE.ref() == 42);
-    bound = false;
-    m.set_identity_resolver(Route, [&](const auto& req) {
-        b->vf[1].VALUE.ref() = 50;
-        if (!bound) {
-            b->vf[1].VALUE.on_write([&](std::uint32_t old, const reg::RegAccessInfo& i) {
-                ++writes;
-                CHECK(old == 50);
-                saved = i;
-            });
-            bound = true;
-        }
-        return req.request_id ^ 1;
-    });
-    CHECK(m.mmio_write(A, 55).success() && writes == 1 && saved.stored_before == 50 &&
+    phase = 1;
+    CHECK(hm.mmio_read(B) == 43 && reads == 1 && saved.address == B);
+    CHECK(hm.mmio_write(A, 42).success() && reads == 1 && hooked->vf[1].VALUE.ref() == 42);
+    phase = 2;
+    CHECK(hm.mmio_write(A, 55).success() && writes == 1 && saved.stored_before == 50 &&
           saved.stored_after == 55 && saved.raw_data == 55 && saved.request_id() == 0 &&
           saved.resolved_id() == 1 && retained.address == A && retained.stored_before == 35);
 }
+
 struct MappedLayout : reg::Bundle {
     REG_BUNDLE(MappedLayout);
     REG_REPEAT_ENTITY(vf, Fields, 4);
@@ -428,37 +435,15 @@ void mapped_equivalence() {
         }
     }
     CHECK(fast.save() == generic.save());
-    // Named slots remain live and keep the executing callable alive across self replacement.
-    bool destroyed = false, alive = false;
-    struct Life {
-        bool* destroyed;
-        ~Life() {
-            *destroyed = true;
-        }
-    };
-    auto life = std::make_shared<Life>();
-    life->destroyed = &destroyed;
-    fast.map().set_access_resolver(P0, [&, life](const auto&) {
-        fast.map().set_access_resolver(P0, [](const auto&) {
-            return 0u;
-        });
-        alive = !destroyed;
-        return 0u;
+    frozen([&] {
+        fast.map().clear_access_resolver(P0);
     });
-    life.reset();
-    fast.map().set_identity_resolver(Route, [](const auto& req) {
-        return req.request_id;
-    });
-#define ZERO_BIND(N)                                                                               \
-    if constexpr (N != 0)                                                                          \
-        fast.map().set_access_resolver(P##N, [](const auto&) {                                     \
-            return 0u;                                                                             \
+    frozen([&] {
+        fast.map().set_identity_resolver(Route, [](const auto& r) {
+            return r.request_id;
         });
-    FIELDS(ZERO_BIND)
-#undef ZERO_BIND
-    CHECK(fast.map().mmio_write(A + 4, 5).success() && alive && destroyed);
-    fast.map().clear_access_resolver(P0);
-    CHECK(fast.map().mmio_write(A, 7).result == reg::RegMemTxResult::DeviceError);
+    });
+    CHECK(fast.map().mmio_write(A, 7).success());
 }
 void context_reset() {
     reg::RegisterMap empty;
@@ -590,12 +575,10 @@ void same_scalar_info(const reg::RegAccessInfo& a, const reg::RegAccessInfo& b) 
 void legacy_scalar_equivalence() {
     reg::RegisterBank<R> fast(reg::space(0x100).name("LEGACY"));
     reg::RegisterBank<R> generic(reg::space(0x100).name("LEGACY"));
-    fast.finish();
     std::vector<reg::RegAccessInfo> fast_events, generic_events;
     bool fail_read = false;
     auto bind = [&](auto& bank, auto& events) {
-        // Install after finish: neither callback presence nor callable state
-        // may be frozen in the direct-access plan.
+        // Callable state and native storage remain mutable after finish.
         bank->ARRAY.on_write([&](const reg::RegAccessInfo& i) {
             events.push_back(i);
             bank->ARRAY.at_element(i.index.linear()).ref() += 1;
@@ -615,22 +598,11 @@ void legacy_scalar_equivalence() {
     };
     bind(fast, fast_events);
     bind(generic, generic_events);
+    fast.finish();
     std::uint64_t seed = 0x123456789abcdefULL;
     const unsigned offsets[] = {
         0, 4, 8, 12, 16, 20, 32, 36, 40, 48, 64, 72, 80, 88, 68, 95, 96, 255, 256};
     for (unsigned k = 0; k != 900; ++k) {
-        if (k == 300) {
-            fast.map().set_pre_access([&](const auto&) {
-                fast->VALUE.ref() = 77;
-            });
-            generic.map().set_pre_access([&](const auto&) {
-                generic->VALUE.ref() = 77;
-            });
-        }
-        if (k == 600) {
-            fast.map().clear_pre_access();
-            generic.map().clear_pre_access();
-        }
         fail_read = k % 17 == 0;
         auto value = random(seed);
         const auto address = offsets[value % std::size(offsets)];
@@ -664,14 +636,14 @@ int main() try {
     equivalent();
     legacy_scalar_equivalence();
     callback_state_and_frames();
-    late_bindings();
+    fixed_bindings();
     callback_errors_and_dynamic_logging();
     field_lifetimes();
     mapped_equivalence();
     identity_without_context(false);
     identity_without_context(true);
     context_reset();
-    std::cout << "PASS: fast/generic equivalence, dynamic binding, storage/snapshot lifetime, 16 "
+    std::cout << "PASS: fast/generic equivalence, fixed binding, storage/snapshot lifetime, 16 "
                  "fields, mapped callback equivalence, context reuse and copied access info\n";
     return 0;
 } catch (const std::exception& e) {

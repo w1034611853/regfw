@@ -1,5 +1,13 @@
 > 0.33.3：前端 API 保持；只声明寄存器的头可改用 <regfw/bundle.hpp>，见 [LayoutCompilation](LayoutCompilation.md)。当前测量见 [Performance](Performance.md)。
 
+本分支面向固定生命周期、单线程 QEMU SysBus 设备，基于无异步队列的 0.37。初始化顺序是：建立 bank → 注册全部 identity/index resolver、pre_access、读写/完成回调 → `finish()` → MMIO。`finish()` 同时冻结布局与绑定；之后 set/clear/首次注册均抛 Configuration，`defer_*` 不再允许未绑定依赖通过 finish。函数捕获的路由表、寄存器值及 logger 等级仍可变化，resolver 结果仍逐次求值。
+
+RegView 只借用实体存储，不持有生命周期计数，也不检测 bank 销毁。使用 view、原生引用及 bridge 时必须保持 bank 存活；移动 bank 保持实体地址。`is_alive()` 仅表示句柄已绑定。框架不再维护 MMIO 重入、entity borrow 或钩子退休保护；同一 map 的 MMIO/save/load 不可在回调中递归进入。这些是本分支的使用前提，不是运行时保护。
+
+流快照 `ar(bank)` / `bank.save(file)` 改为紧凑格式：布局 hash、实际位宽的实体值及活动事务，省去 schema 明细。无参 `bank.save()` 仍返回完整 `VersionedSnapshot` v2，供内存检查与兼容用途。旧版 bank 流不能直接由新版 load 读取，需要重新生成或在旧版解析为 VersionedSnapshot 后显式加载。头文件、库和设备必须配套重编译。详情见 [固定生命周期优化](Performance-Fixed-Lifetime.md) 和 [快照格式](Snapshot.md)。
+
+以下旧版本记录若涉及生命周期或流格式，以本节为准。
+
 # regfw 0.33.3：面向 Agent 的使用说明与 API 契约
 
 适用版本：**regfw 0.33.3，配套 hlog 3.2.1，C++20**。本文根据该发布包的公开 API、运行时实现及测试核对编写，供编写设备模型的 Agent 直接使用。本文描述当前行为，不把建议或未来能力写成已有 API。
@@ -36,8 +44,8 @@
 10. ≤64 bit 默认逐次独立访问；>64 bit 默认 `TransactionPolicy::LOW_TO_HIGH`。512 bit 命令应声明为**一个 512 bit REG**，不是 16 个独立 uint32 寄存器。
 11. 宽事务按完成端地址触发，不检查每个字节是否都访问过；软件必须遵守分拍协议。
 12. 命令、doorbell、FIFO 端口也必须生成 REG 实体；不存在独立 command 解码区。按实际协议声明位宽、数组和 transaction。
-13. 同一 `RegisterMap` 不支持未经同步的 Host 多线程访问；普通 bool 重入检查不是互斥锁。不要在回调中递归调用同一 map 的 MMIO。
-14. `finish()` 冻结布局并检查 resolver 绑定；普通寄存器回调不是必需项，可在 finish 后首次绑定，但同一实体同种回调不能重复注册。
+13. 同一 `RegisterMap` 不支持未经同步的 Host 多线程访问；本分支不维护重入检查。不要在回调中递归调用同一 map 的 MMIO。
+14. `finish()` 冻结布局并检查 resolver 绑定；普通寄存器回调不是必需项，但必须在 finish 前注册，同一实体同种回调不能重复注册。
 15. 回调异常会被捕获；有 logger 且 ERROR 启用才会打印。普通读值回调抛异常可能仍返回 `Ok`，值为 0；不要只靠 `.success()` 判断业务成功。
 16. 不要使用已删除的 CommandPort、command window、REG_COMMAND_REGION 或 Split64 API，也不要虚构 `.on_write_complete()`、`RegView.bind()`、Rust 风格字段访问器或内部 inc/dec API。本文给出的名称才是本版可用写法。
 17. 完整快照使用 bank.save/load 或版本化接口，包含进行中事务；旧 dump_state(span)/restore_state(span) 仍只处理值。接原有 vmstate_fields/module_var_*，不要求 VMStateDescription。
@@ -78,9 +86,9 @@
 
 `bank->xxx` / `(*bank).xxx` 取得 bundle 成员；`bank.map()` 取得 map。`reg::space(size).name(name).root(root_name).logger(logger).reset_scope(scope)` 设置构建参数。`.finalize()` 可以在构建时直接 finish，但有必需 resolver 时通常不适合，因为还来不及绑定。
 
-此 0.37 优化分支专用于单线程设备：view 的创建、复制、销毁、访问与 Bank 生命周期必须串行执行。RegView 的原子弱引用改为普通引用计数；不支持在多个线程中独立复制/销毁同一 Bank 的句柄。无需更改 `.at()`、`.ref()`、`.bits` 或回调 API，升级时必须一起重编译头文件和库。性能与集成说明见 [Performance-Handles](Performance-Handles.md)。
+此 0.37 优化分支专用于单线程设备：view 的创建、复制、销毁、访问与 Bank 生命周期必须串行执行。RegView 不维护引用计数，不检测 bank 是否已销毁。无需更改 `.at()`、`.ref()`、`.bits` 或回调 API，升级时必须一起重编译头文件和库。性能与集成说明见 [Performance-Handles](Performance-Handles.md)。
 
-bank 移动时底层对象地址保持稳定；现有 view 和 C bridge 仍指向同一底层对象。`bank.clear()` / 销毁会使 view 失效，受检访问会抛异常；之前取得的原生引用/指针仍遵循 C++ 生命周期规则，不能指望框架保护悬空引用。lambda 捕获的设备、FIFO、logger 必须活得足够久；临时 `info` 和其中的引用不能保留到异步任务。
+bank 移动时底层对象地址保持稳定；现有 view 和 C bridge 仍指向同一底层对象。`bank.clear()` / 销毁会使 view 失效，此后不得再访问；之前取得的原生引用/指针仍遵循 C++ 生命周期规则，不能指望框架保护悬空引用。lambda 捕获的设备、FIFO、logger 必须活得足够久；临时 `info` 和其中的引用不能保留到异步任务。
 
 ## 3. 完整示例 A：最小布局、普通回调、内部访问
 
@@ -262,7 +270,7 @@ REG(MIXED, std::uint32_t,
 | `.address_span_bytes()` | 包含地址 stride 空洞的总线跨度 |
 | `.entity()` | 真实实体身份、元素总数、位宽、维度、存储大小 |
 | `.reset()` | 复位整个实体，不只当前元素或 subspan |
-| `.is_alive()` | 检查句柄生命周期 |
+| `.is_alive()` | 检查句柄是否绑定，不检测 bank 销毁 |
 | `.metadata()` / `.diagnostic_name()` | 获取声明/诊断信息 |
 
 例如 `dims(2,4)` 的 `[1][2]` 展平编号为 `1*4+2=6`，无论总线 stride 是否紧密排列。`at_element(6)` 不是地址 `+6` 或第 6 个字节。对 `root.subspan(2,3)`，`at_element(0)` 是 root 第 2 个元素。
@@ -285,7 +293,7 @@ REG(MIXED, std::uint32_t,
 | `.on_write(f)` | `(T old,const auto& info)`、`(const auto& info)`、`() ` | 作为事件使用；推荐 void，不把返回值当数据 |
 | `.on_read_complete(f)` | `(T snapshot,const auto& info)`、`(const auto& info)`、`() ` | 必须 void |
 
-只接收一个值参数 `(T value)` 不是受支持的独立形状；使用 `(T value,const auto& info)`。同一个实体的每种回调只可注册一次；不能通过再次调用 on_read 覆盖旧函数。`has_on_read()` / `has_on_write()` / `has_on_read_complete()` 可查询。resolver 可以换绑，与普通回调的单次注册规则不同。
+只接收一个值参数 `(T value)` 不是受支持的独立形状；使用 `(T value,const auto& info)`。同一个实体的每种回调只可注册一次；不能通过再次调用 on_read 覆盖旧函数。`has_on_read()` / `has_on_write()` / `has_on_read_complete()` 可查询。resolver 仅在 finish 前可以换绑，与普通回调的单次注册规则不同。
 
 ### 7.2 读取返回值
 
@@ -549,9 +557,9 @@ map.set_access_resolver(PhysicalPool, "Device::pool",
 ### 11.3 resolver 生命周期与错误
 
 - `finish()` 检查被布局引用的命名 identity/index resolver 是否绑定，即使某些条件运行时不命中，声明的依赖仍需满足。
-- `set_identity_resolver(key,...)` / `set_access_resolver(key,...)` 可以在 finish 后换绑；新访问使用新函数。
-- `clear_*_resolver(key)` 后若仍执行相关访问会失败；`has_*_resolver(key)` 查询绑定状态。
-- `defer_identity_resolver(key)` / `defer_access_resolver(key)` 是 finish 前显式延迟绑定的特殊机制，不提供默认业务值；实际访问前仍应绑定。
+- `set_identity_resolver(key,...)` / `set_access_resolver(key,...)` 仅可在 finish 前换绑；finish 后调用会抛 Configuration。
+- `clear_*_resolver(key)` 仅可在 finish 前调用；`has_*_resolver(key)` 查询绑定状态。
+- `defer_identity_resolver(key)` / `defer_access_resolver(key)` 保留配置入口，但不能让未绑定依赖通过 finish；所有依赖都须提前绑定。
 - identity 越界默认 AccessError；`.set_identity_rejection_policy(reg::IdentityRejectionPolicy::Ignore)` 可让显式身份拒绝变为 Ignored，但 resolver 自身普通异常仍为 DeviceError。
 - 普通 resolver 抛异常返回 DeviceError；可用 `reg::RegAccessDeriveError::access_error("...")` 等明确分类。不要使用普通回调抛异常来要求 MMIO 总线失败。
 
@@ -930,7 +938,7 @@ bank.load(saved);
 
 schema v2 记录 stable_id、order、word 布局、所有位宽、数组 dimensions/strides、transaction 策略和哈希。恢复先验证 schema、索引、payload 位宽/掩码及完整性，再准备所有实体值/暂存并统一提交；错误不改变 bank。stable_id 和显式 order 需全 map 唯一。schema 不替代设备字段语义的版本管理，v1 格式明确拒绝。
 
-**沿用已有 vmstate_fields，不用 VMStateDescription**：包含 `<regfw/vmstate.hpp>` 后可 `bank.save(file)` / `bank.load(file)`，另有大写 Save/Load 别名。该可选头使用工程已有的 `<vmstate_fields.hpp>` 和 qemu_interface.h，底层还是 module_var_save/load。`extras/vmstate_fields.hpp` 附带此前版本的原样副本供复用。
+**沿用已有 vmstate_fields，不用 VMStateDescription**：包含 `<regfw/vmstate.hpp>` 后可 `bank.save(file)` / `bank.load(file)`，另有大写 Save/Load 别名。该可选头使用工程已有的 `<vmstate_fields.hpp>` 和 qemu_interface.h，底层还是 module_var_save/load。`extras/vmstate_fields.hpp` 提供公开 Bytes 批量入口，可复用而无需替换工程的 qemu_interface.h。
 
 父对象使用 `VMSTATE_FIELDS(bank, fifo, vf_route, ...)` 即可递归登记 bank；bank 已有 VmstateFields hook，不需列出其私有字段。此形式只要求原有 vmstate_fields 与 regfw 公共头。也可自行构造带 Limits 的 Writer/Reader 并调用 bank.save(writer)/load(reader)。流协议继承原有框架的 Host 原生表示、容器数量/总字节/递归限制；底层 module_var_load 必须完整读取或报告失败。
 
@@ -950,11 +958,11 @@ schema v2 记录 stable_id、order、word 布局、所有位宽、数组 dimensi
 | 不同地址入口映射同一实体元素 | 仍共享事务状态，不因入口不同而隔离 |
 | 不同数组元素/不同 VF 实体 | 分别有元素事务状态，但同一 map 的调用仍需同步 |
 | Host 多线程同时操作同一 RegisterMap | 不支持自动线程安全，必须外部串行化 |
-| on_read/on_write 回调里递归调用同一 map 的 MMIO | 不支持，DispatchGuard 拒绝；不是支持重入的递归锁 |
-| 同步回调内直接读取/修改普通实体 `.ref()` | 可作为内部访问；不要在 behavior borrow 阶段重入同一实体 |
+| on_read/on_write 回调里递归调用同一 map 的 MMIO | 不支持；本分支不再做运行时重入检测 |
+| 同步回调内直接读取/修改普通实体 `.ref()` | 可作为内部访问；不得递归调用同 map 的 MMIO |
 | 回调把命令提交给异步工作线程 | 设备自行实现队列；复制值和必要上下文，不保存 info/实体可变引用 |
 
-map 的 dispatching_、entity borrowed 都是普通重入状态，不是 atomic 或 mutex；不要把异常检测当成并发保护。QEMU 工程若已有覆盖该路径的锁可复用，但不能仅因使用了 QEMU/MMIO 就假定所有访问及异步设备线程都被保护。
+本分支已删除 dispatching_、entity borrowed 及相应检查；没有并发或递归访问保护。QEMU 工程若已有覆盖该路径的锁可复用，但不能仅因使用了 QEMU/MMIO 就假定所有访问及异步设备线程都被保护。
 
 逐次 MMIO 加锁只能保护 Host 数据竞争，不能阻止两个 guest CPU 的两条宽命令按拍混叠。完整命令的独占所有权要由 guest 软件协议、不同通道/实体，或额外的设备发起者事务机制保证。本版不按 vCPU/线程/reqid 自动给同一实体复制事务上下文。
 
@@ -1188,7 +1196,7 @@ C bridge 不提供锁、发起 vCPU ID、设备时钟、DMA、IRQ 或事务调�
 | 只配置写侧 CommitOnHigh，读仍多次触发 | 读模式仍是 Independent | 需要快照时把读侧设置为 SnapshotOnLow，或选 LOW_TO_HIGH |
 | 两笔写命令串起来数据混乱 | 同元素共用 pending | 软件/通道保证整笔事务所有权 |
 | 仅加每拍锁，仍有两 CPU 命令混叠 | 锁数据竞争不等于隔离整笔协议 | 独立通道、软件事务锁或设备额外上下文 |
-| 多次调用 on_read 想换绑 | 普通回调只可注册一次 | 回调捕获可变模型状态；resolver 另有换绑 API |
+| 多次调用 on_read 想换绑 | 普通回调只可注册一次 | 回调捕获可变模型状态；resolver 也必须在 finish 前完成绑定 |
 | `.map(vf[i])` 的共享子窗报冲突 | 子窗覆盖父实体声明 | 父实体在整个子窗范围内留空 |
 | target 地址没体现 pool 下标变化 | 框架不重编码下标后的地址 | 看 info.index / mapped_as |
 | 内部 .address() 显示 PF_VF 路径 | 首次映射提供规范入口 | 本次请求看 info.address，不从规范路径推请求源 |
@@ -1271,7 +1279,7 @@ reg_bank.map().set_pre_access(CheckBusiness,
 
 每次有效 MMIO beat 都调用，包括宽 REG 的暂存写和快照续读。RO 忽略写、入口权限拒绝、未映射/保留地址及 resolver 失败不会运行钩子。内部 ref()/data 更新、reset、save/load、describe_layout、explain_address 不运行钩子。
 
-命名键未绑定时 finish 报 Configuration；有意延迟绑定可 map.defer_pre_access(key)。之后可 set/clear/has_pre_access(key)；clear 只清该键，不影响全局钩子或其他键。已声明但未绑定的 View 钩子在访问时按钩子失败处理，不会静默放行；需要禁用时显式绑定空函数。重绑/clear 与 MMIO 由设备同步，不新增线程安全。
+命名键未绑定时 finish 报 Configuration，defer_pre_access 不绕过验证。set/clear 只能在 finish 前调用；has_pre_access 可随时查询。需要业务条件禁用时，在已绑定函数中判断捕获的状态。
 
 异常沿用原有 pre_access 行为：打印并停止后续钩子、behavior 和寄存器回调；写返回 Ignored，读返回 0（状态可能为 Ok），不回退其他映射。不要用此异常机制要求明确的总线 AccessError；此类需求仍在解析/验证阶段处理。钩子是 void，不使用返回 false 表达拒绝。
 

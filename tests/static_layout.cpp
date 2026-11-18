@@ -8,6 +8,17 @@
                                      #__VA_ARGS__);                                                \
     } while (false)
 namespace {
+template <class F>
+void frozen(F&& f) {
+    bool caught = false;
+    try {
+        f();
+    } catch (const reg::Error& e) {
+        caught = e.kind == reg::ErrorKind::Configuration;
+    }
+    CHECK(caught);
+}
+
 constexpr std::uint64_t A = 0xff71f0000000ULL, B = 0xc100000000ULL, C = 0xc200000000ULL;
 REG_ACCESS_FIELD(Route, std::uint32_t);
 REG_ACCESS_FIELD(L, std::uint32_t);
@@ -122,9 +133,9 @@ void differential() {
         }
         bank.finish();
     };
+    dynamic.map().set_pre_access([](const auto&) {});
     setup(fast, a_effect, a_info);
     setup(dynamic, b_effect, b_info);
-    dynamic.map().set_pre_access([](const auto&) {});
     CHECK(fast.map().layout_warnings().size() == dynamic.map().layout_warnings().size());
     std::uint64_t seed = 0x123456789abcdefULL;
     const unsigned offsets[] = {0, 4, 8, 12, 16, 28, 32, 48, 64, 68, 128, 132, 156, 188, 252};
@@ -168,19 +179,15 @@ void differential() {
           fast.map().mmio_read(C + 0x300 + 32) == 99);
     CHECK(fast.map().mmio_write(C + 32, 7).result == reg::RegMemTxResult::Ignored &&
           fast->shared.SHARED.ref() == 99);
-    fast.map().clear_identity_resolver(Route);
-    CHECK(fast.map().mmio_write(B + 0x200 + 4, 1).result == reg::RegMemTxResult::DeviceError);
-    fast.map().set_identity_resolver(Route, [](const auto& r) {
-        return r.request_id;
+    frozen([&] {
+        fast.map().clear_identity_resolver(Route);
     });
-    fast.map().clear_access_resolver(P);
-    CHECK(fast.map().mmio_write(B + 0x200 + 4, 1).result == reg::RegMemTxResult::DeviceError);
-    fast.map().set_access_resolver(P, [](const auto& i) {
-        return i.index_as(L);
+    frozen([&] {
+        fast.map().clear_access_resolver(P);
     });
-    fast.map().clear_pre_access(Check);
-    CHECK(fast.map().mmio_write(B + 0x200 + 4, 1).result == reg::RegMemTxResult::Ignored);
-    fast.map().set_pre_access(Check, [](const auto&) {});
+    frozen([&] {
+        fast.map().clear_pre_access(Check);
+    });
     CHECK(fast.map().mmio_write(B + 0x200 + 4, 1).success());
     CHECK(fast.map().describe_layout(reg::LayoutDetail::Full).find("VF") != std::string::npos);
     CHECK(fast.map().explain_address(B + 32).find("SHARED") != std::string::npos);
@@ -213,11 +220,12 @@ void static_index() {
     unsigned shift = 1;
     reg::RegAccessInfo saved, other;
     unsigned bcalls = 0, gcalls = 0;
+    bool invalid = false;
     generic.map().set_pre_access([](const auto&) {});
     auto setup = [&](auto& bank, reg::RegAccessInfo& info, unsigned& calls) {
         bank.map().set_access_resolver(P, [&, count = 0](const auto& i) mutable {
             calls = ++count;
-            return (i.index_as(L) + shift) % 3;
+            return invalid ? 9u : (i.index_as(L) + shift) % 3;
         });
         bank->regs.TABLE.on_write([&](std::uint32_t old, const reg::RegAccessInfo& i) {
             CHECK(i.stored_before == old && i.mapped_as(P) == i.index.values[0]);
@@ -255,25 +263,21 @@ void static_index() {
     b.reset();
     b.load(state);
     CHECK(saved.index == copy.index);
-    b.map().set_access_resolver(P, [](const auto&) {
-        return 9u;
-    });
+    invalid = true;
     CHECK(b.map().mmio_write(A, 1).result == reg::RegMemTxResult::AccessError);
-    b.map().clear_access_resolver(P);
-    CHECK(b.map().mmio_write(A, 1).result == reg::RegMemTxResult::DeviceError);
-    // A resolver can add a global hook during this very MMIO. It runs once, with
-    // complete metadata, without executing the resolver a second time.
-    unsigned resolves = 0, hooks = 0;
-    b.map().set_access_resolver(P, [&](const auto& i) {
-        ++resolves;
-        b.map().set_pre_access([&](const auto& p) {
-            ++hooks;
-            CHECK(p.mapped_as(P) == p.index.values[0]);
-        });
-        return i.index_as(L);
+    invalid = false;
+    frozen([&] {
+        b.map().clear_access_resolver(P);
     });
-    CHECK(b.map().mmio_write(A, 7).success() && resolves == 1 && hooks == 1);
-    b.map().clear_pre_access();
+    frozen([&] {
+        b.map().set_access_resolver(P, [](const auto&) {
+            return 0u;
+        });
+    });
+    frozen([&] {
+        b.map().set_pre_access([](const auto&) {});
+    });
+    CHECK(b.map().mmio_write(A, 7).success());
 }
 
 struct Incomplete : reg::RegEntityBundle {

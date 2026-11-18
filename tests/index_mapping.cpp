@@ -63,10 +63,11 @@ struct DeviceLayout : reg::Bundle {
 struct Device {
     reg::RegisterBank<DeviceLayout> bank;
     unsigned calls{}, last_vf = 99;
+    bool redirect = false, called = false;
     Device() {
         bank.init(reg::space(0x3000).name("INDEX_MAPPING"));
-        bank.map().set_identity_resolver(VfRoute, [](const auto& r) {
-            return r.request_id;
+        bank.map().set_identity_resolver(VfRoute, [this](const auto& r) {
+            return redirect && r.request_id == 2 ? 6u : r.request_id;
         });
         bank.map().set_access_resolver(LPool,
                                        [this](const reg::RegAccessInfo& info) -> std::uint32_t {
@@ -74,6 +75,15 @@ struct Device {
                                            last_vf = info.resolved_id();
                                            return (info.index_as(VlPool) + 1) % 4;
                                        });
+        bank->vf[6].QUEUE.on_write([this](const auto& info) {
+            if (!redirect)
+                return;
+            CHECK(info.request_id() == 2 && info.resolved_id() == 6);
+            CHECK(info.index_as(VlPool) == 2 && info.mapped_as(LPool) == 3);
+            const auto [row, pool] = info.index.get();
+            CHECK(row == 1 && pool == 3);
+            called = true;
+        });
         bank.finish();
     }
 };
@@ -98,19 +108,9 @@ int main() {
     CHECK(device.calls == 24);
     CHECK(map.mmio_write(0x28, 77).success()); // PF bypasses the resolver.
     CHECK(bank->pf.QUEUE.at(1, 2).u32 == 77 && device.calls == 24);
-    map.set_identity_resolver(VfRoute, [](const reg::IdentityResolveRequest& r) {
-        return r.request_id == 2 ? 6u : r.request_id;
-    });
-    bool called = false;
-    bank->vf[6].QUEUE.on_write([&](const auto& info) {
-        CHECK(info.request_id() == 2 && info.resolved_id() == 6);
-        CHECK(info.index_as(VlPool) == 2 && info.mapped_as(LPool) == 3);
-        const auto [row, pool] = info.index.get();
-        CHECK(row == 1 && pool == 3);
-        called = true;
-    });
+    device.redirect = true;
     CHECK(map.mmio_write(0x1000 + 2 * 0x200 + 0x28, 99).success());
-    CHECK(called && device.last_vf == 6 && bank->vf[6].QUEUE.at(1, 3).u32 == 99);
+    CHECK(device.called && device.last_vf == 6 && bank->vf[6].QUEUE.at(1, 3).u32 == 99);
     std::cout << "PASS: declarative selective 1D/2D index rules, 8 VFs, PF passthrough and VF "
                  "remap ordering\n";
 }

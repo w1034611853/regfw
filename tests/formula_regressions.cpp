@@ -48,14 +48,13 @@ void test_prepared_indices() {
     auto& map = bank.map();
     std::array<std::uint32_t, 4> actual{};
     std::uint32_t rank = 0, callbacks = 0;
-    bank.finish();
-    // Attach the hook after the decoder was prepared; it must remain live.
     bank->regs.DATA.on_write([&](const reg::RegAccessInfo& info) {
         rank = static_cast<std::uint32_t>(info.index.rank());
         for (std::size_t d = 0; d < info.index.coordinates().size() && d < actual.size(); ++d)
             actual[d] = info.index.coordinates()[d];
         ++callbacks;
     });
+    bank.finish();
     for (std::uint32_t a = 0; a < 2; ++a)
         for (std::uint32_t b = 0; b < 2; ++b)
             for (std::uint32_t c = 0; c < 2; ++c)

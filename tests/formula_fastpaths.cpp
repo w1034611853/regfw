@@ -132,33 +132,21 @@ void memo_dynamic_state() {
         map.mmio_write(0, 0x33);
         CHECK(bank->r.A.ref() == 0x33);
     }
-    // Attach an on_read AFTER finish: the direct path must not bypass it.
-    unsigned reads = 0;
-    bank->r.A.on_read([&](std::uint32_t value, const reg::RegAccessInfo&) {
+    // Callbacks configured before finish participate in prepared dispatch.
+    reg::RegisterBank<MemoLayout> hooked(reg::space(8).name("MEMO"));
+    unsigned reads = 0, writes = 0;
+    hooked->r.A.on_read([&](std::uint32_t value, const reg::RegAccessInfo&) {
         ++reads;
         return value ^ 0xff;
     });
-    CHECK(map.mmio_read(0) == (0x33u ^ 0xffu));
-    CHECK(reads == 1);
-    // Fresh bank: an on_write attached later must still run, and a
-    // reentrant read from inside a callback must hit the borrow guard.
-    reg::RegisterBank<MemoLayout> guard(reg::space(8).name("MEMO").finalize());
-    unsigned writes = 0;
-    guard->r.B.on_write([&](const reg::RegAccessInfo&) {
+    hooked->r.B.on_write([&](const reg::RegAccessInfo&) {
         ++writes;
     });
-    guard.map().mmio_write(4, 0x44);
-    CHECK(guard->r.B.ref() == 0x44 && writes == 1);
-    bool reentrant = false;
-    guard->r.A.on_read([&](std::uint32_t, const reg::RegAccessInfo&) {
-        // Reentrant MMIO on the same map is rejected by the dispatch guard:
-        // the nested read fails and B keeps its stored value.
-        const auto nested = guard.map().try_mmio_read_sized(4, 4);
-        reentrant = !nested.success() && guard->r.B.ref() == 0x44;
-        return 0;
-    });
-    (void)guard.map().mmio_read(0);
-    CHECK(reentrant);
+    hooked.finish();
+    hooked->r.A.ref() = 0x33;
+    CHECK(hooked.map().mmio_read(0) == (0x33u ^ 0xffu) && reads == 1);
+    CHECK(hooked.map().mmio_write(4, 0x44).success());
+    CHECK(hooked->r.B.ref() == 0x44 && writes == 1);
     // Another fresh bank: plain reads work again end-to-end
     reg::RegisterBank<MemoLayout> bank2(reg::space(8).name("MEMO").finalize());
     bank2->r.A.ref() = 0x55;

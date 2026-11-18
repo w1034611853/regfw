@@ -3,7 +3,6 @@
 #include "storage.hpp"
 #include "entity.hpp"
 #include "detail/static_plan.hpp"
-#include "detail/handle_lifetime.hpp"
 #include <hlog.h>
 #include <cassert>
 #include <cstddef>
@@ -67,6 +66,15 @@ struct MappedAccessFrame {
               StoredField* logical = nullptr,
               StoredField* physical = nullptr) const;
 };
+// Keep cleanup visible to the optimizer so unused info fields can disappear.
+// Limit forced inlining to destruction, without flattening device callbacks or
+// changing RegAccessInfo's aggregate/copy/move semantics.
+struct FrameAccessInfo final : RegAccessInfo {
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((always_inline, flatten))
+#endif
+    ~FrameAccessInfo() = default;
+};
 struct ScalarAccessFrame {
     const ScalarAccessSite* site;
     std::uint64_t address;
@@ -78,7 +86,7 @@ struct ScalarAccessFrame {
     std::uint64_t prepared_target{};
     template <class F>
     REGFW_DETAIL_ALWAYS_INLINE decltype(auto) with_mapped_info(F&& callback) const {
-        RegAccessInfo info;
+        FrameAccessInfo info;
         StoredField logical, physical;
         mapped->fill(info, *this, &logical, &physical);
         return std::forward<F>(callback)(info);
@@ -88,7 +96,7 @@ struct ScalarAccessFrame {
         // Separate lifetimes let the compiler discard unused scalar fields.
         if (mapped)
             return with_mapped_info(std::forward<F>(callback));
-        RegAccessInfo info;
+        FrameAccessInfo info;
         fill_scalar(info);
         return std::forward<F>(callback)(info);
     }
@@ -375,41 +383,25 @@ class ScalarReadSource {
 using WideReadSource = std::function<WideRegData(WideRegData, const RegAccessInfo&)>;
 } // namespace detail
 namespace detail {
-void* checked_value_pointer(EntityState* node,
-                            std::size_t index,
-                            const void* token,
-                            const detail::HandleLifetime& life,
-                            std::size_t rank,
-                            bool empty = false);
-void* checked_value_pointer(EntityState* node,
-                            std::size_t index,
-                            const void* token,
-                            const std::shared_ptr<void>& life,
-                            std::size_t rank,
-                            bool empty = false);
+void* checked_value_pointer(
+    EntityState* node, std::size_t index, const void* token, std::size_t rank, bool empty = false);
 } // namespace detail
 namespace detail {
-// Selection is compiled once; cheap single-threaded lifetime copies stay inline.
+// Non-owning selection. The device keeps its bank alive for every view use.
 class HandleState {
   protected:
     EntityState* node_{};
     std::size_t index_{};
     std::size_t count_{};
-    HandleLifetime lifetime_;
-    const bool* borrowed_{};
     std::weak_ptr<void> weak_lifetime() const;
     HandleState(const HandleState& parent, std::size_t index, std::size_t count, TrustedAccessTag)
-        : node_(parent.node_), index_(index), count_(count), lifetime_(parent.lifetime_),
-          borrowed_(parent.borrowed_) {
+        : node_(parent.node_), index_(index), count_(count) {
     }
-    [[noreturn]] static void expired_handle();
+    [[noreturn]] static void unbound_handle();
     [[noreturn]] static void element_out_of_range();
-    [[noreturn]] void borrowed_handle() const;
     void check() const {
-        if (!node_ || lifetime_.expired())
-            expired_handle();
-        if (*borrowed_)
-            borrowed_handle();
+        if (!node_)
+            unbound_handle();
     }
     EntityState* checked_node() const;
     std::size_t checked_element(std::size_t index) const {
@@ -428,14 +420,7 @@ class HandleState {
 
   public:
     HandleState();
-    HandleState(EntityState* node,
-                std::size_t index,
-                const detail::HandleLifetime& life,
-                std::size_t count = std::dynamic_extent);
-    HandleState(EntityState* node,
-                std::size_t index,
-                const std::shared_ptr<void>& life,
-                std::size_t count = std::dynamic_extent);
+    HandleState(EntityState* node, std::size_t index, std::size_t count = std::dynamic_extent);
     HandleState(const HandleState&) = default;
     HandleState(HandleState&&) noexcept = default;
     ~HandleState() = default;
@@ -627,29 +612,17 @@ class RegView final
     }
 
   private:
-    template <class Lifetime>
-    REGFW_DETAIL_ALWAYS_INLINE RegView(detail::EntityState* node,
-                                       std::size_t index,
-                                       const Lifetime& life,
-                                       std::size_t count = std::dynamic_extent)
-        : RegView(node,
-                  index,
-                  life,
-                  count,
-                  static_cast<T*>(detail::checked_value_pointer(node,
-                                                                index,
-                                                                &detail::value_type_token<T>,
-                                                                life,
-                                                                Rank,
-                                                                !ValueAccess && count == 0))) {
+    REGFW_DETAIL_ALWAYS_INLINE
+    RegView(detail::EntityState* node, std::size_t index, std::size_t count = std::dynamic_extent)
+        : RegView(
+              node,
+              index,
+              count,
+              static_cast<T*>(detail::checked_value_pointer(
+                  node, index, &detail::value_type_token<T>, Rank, !ValueAccess && count == 0))) {
     }
-    template <class Lifetime>
-    RegView(detail::EntityState* node,
-            std::size_t index,
-            const Lifetime& life,
-            std::size_t count,
-            T* value)
-        : Members(value), detail::HandleState(node, index, life, count), value_(value) {
+    RegView(detail::EntityState* node, std::size_t index, std::size_t count, T* value)
+        : Members(value), detail::HandleState(node, index, count), value_(value) {
     }
     RegView(const detail::HandleState& parent, std::size_t index, T* value, std::size_t count)
         : Members(value), detail::HandleState(parent, index, count, detail::TrustedAccessTag{}),
@@ -877,13 +850,13 @@ struct AccessResolverSlot {
     bool deferred{};
     bool required{};
     RegData from_frame(const ScalarAccessFrame& frame) const {
-        auto fn = callback;
+        const auto* fn = callback.get();
         if (!fn)
             throw RegAccessDeriveError::device_error("access resolver is not bound: " + name);
         return fn->from_frame(frame);
     }
     RegData operator()(const RegAccessInfo& info) const {
-        auto fn = callback; // May be cleared/replaced from inside the callback.
+        const auto* fn = callback.get();
         if (!fn)
             throw RegAccessDeriveError::device_error("access resolver is not bound: " + name);
         return (*fn)(info);
@@ -907,8 +880,6 @@ class RegisterMap {
     struct AliasHop;
     struct Resolution;
     struct AddressResolution;
-    struct DispatchGuard;
-    struct PreAccessGuard;
     struct AccessScratch;
     std::unique_ptr<AccessScratch> access_scratch_;
     struct InstanceWindow;
@@ -937,7 +908,7 @@ class RegisterMap {
     HLogLogger* logger_{};
     bool log_enabled(HLogLevel level) const noexcept;
     void emit_log(const detail::LogRecord& record) const noexcept;
-    bool finalized_{}, dispatching_{}, pre_access_active_{};
+    bool finalized_{};
     struct ViewPolicy {
         std::uint64_t base, size;
         AliasAccessPolicy policy;
@@ -953,7 +924,6 @@ class RegisterMap {
     bool identity_deferred_{};
     IdentityRejectionPolicy identity_rejection_policy_ = IdentityRejectionPolicy::AccessError;
     std::shared_ptr<const PreFn> pre_access_;
-    std::vector<std::shared_ptr<const PreFn>> retired_pre_access_;
     // Slots are sparse, but resolver lookup is outside the ordinary MMIO path.
     struct ResolverRegistry;
     std::unique_ptr<ResolverRegistry> access_resolvers_;
@@ -983,8 +953,6 @@ class RegisterMap {
     void emit_resolver_update(std::string_view key,
                               const detail::CallbackDescription& description,
                               bool bound) const noexcept;
-    void release_retired_pre_access() noexcept;
-    void retire_pre_access(const std::shared_ptr<const PreFn>& callback);
     void bind_pre_access(std::shared_ptr<const PreFn> callback);
     std::shared_ptr<detail::PreAccessSlot> view_pre_access_slot(const void* key,
                                                                 std::string_view name);
@@ -1002,6 +970,7 @@ class RegisterMap {
     std::optional<std::uint32_t> source_instance(std::uint64_t address) const;
     const detail::AddressWindow* window_at(std::uint64_t address) const;
     void mutable_layout() const;
+    void mutable_bindings() const;
     void region_check(std::uint64_t base, std::uint64_t n) const;
     AliasEntry
     walk_alias(std::uint64_t original, unsigned size, std::vector<AliasHop>* hops = nullptr) const;
@@ -1137,7 +1106,7 @@ class RegisterMap {
                                            std::optional<std::uint32_t> instance = {}) {
         auto* node = create_spec<detail::wide_value_v<T>>(
             address, std::move(name), spec, detail::storage_type<T>, instance);
-        return RegView<T, R, !A>(node, 0, life_);
+        return RegView<T, R, !A>(node, 0);
     }
     template <class T>
     auto create_reg(std::uint64_t address,
@@ -1259,7 +1228,7 @@ class RegisterMap {
         mutable_layout();
         identity_deferred_ = true;
     }
-    // Binding is independent of layout finalization; existing plans retain this stable slot.
+    // Plans retain stable slots; registration is frozen together with the layout.
   private:
     template <class Tag, class V>
     std::shared_ptr<detail::AccessResolverSlot> access_resolver_slot(FieldKey<Tag, V> key) {
@@ -1380,6 +1349,9 @@ class RegisterMap {
 
   private:
     std::vector<Node*> snapshot_nodes() const;
+    void restore_snapshot_payload(std::span<Node* const> nodes,
+                                  std::span<const RegData> data,
+                                  std::span<const SnapshotEntityRuntime> runtime);
 
   public:
     SnapshotSchema snapshot_schema() const;
@@ -1394,6 +1366,10 @@ class RegisterMap {
 
     VersionedSnapshot dump_state_versioned() const;
     void restore_state_versioned(const VersionedSnapshot& snapshot);
+    // Compact archive payload: layout digest, packed values and active transactions.
+    std::size_t max_compact_snapshot_words() const;
+    std::vector<RegData> dump_state_compact() const;
+    void restore_state_compact(std::span<const RegData> payload);
 };
 
 

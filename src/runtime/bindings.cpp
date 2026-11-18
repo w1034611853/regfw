@@ -80,7 +80,6 @@ RegisterMap::Node* RegisterMap::create_node(std::uint64_t address,
 }
 std::tuple<std::uint64_t, AccessRoute, std::optional<AccessIdentity>>
 RegisterMap::resolve_address_with_identity(std::uint64_t address, unsigned size) {
-    DispatchGuard guard(*this);
     auto r = resolve_metadata(address, size);
     return std::tuple{r.alias.target, r.alias.route, r.identity};
 }
@@ -113,7 +112,7 @@ std::weak_ptr<void> RegisterMap::lifetime() const {
 }
 void RegisterMap::bind_identity_resolver(std::shared_ptr<const IdentityFn> callback,
                                          detail::CallbackDescription description) {
-    require_initialized();
+    mutable_bindings();
     identity_resolver_ = std::move(callback);
     identity_description_ = std::move(description);
     emit_resolver_update("identity", identity_description_, bool(identity_resolver_));
@@ -123,25 +122,14 @@ void RegisterMap::bind_access_resolver(
     std::string_view name,
     std::shared_ptr<const detail::AccessResolverSlot::Function> callback,
     detail::CallbackDescription description) {
+    mutable_bindings();
     auto slot = access_resolver_slot(key, name);
     slot->callback = std::move(callback);
     slot->description = std::move(description);
     emit_resolver_update(slot->name, slot->description, bool(slot->callback));
 }
-void RegisterMap::release_retired_pre_access() noexcept {
-    while (!retired_pre_access_.empty()) {
-        decltype(retired_pre_access_) pending;
-        pending.swap(retired_pre_access_);
-        pending.clear();
-    }
-}
-void RegisterMap::retire_pre_access(const std::shared_ptr<const PreFn>& callback) {
-    if (pre_access_active_ && callback)
-        retired_pre_access_.push_back(callback);
-}
 void RegisterMap::bind_pre_access(std::shared_ptr<const PreFn> callback) {
-    require_initialized();
-    retire_pre_access(pre_access_);
+    mutable_bindings();
     pre_access_ = std::move(callback);
 }
 std::shared_ptr<detail::PreAccessSlot> RegisterMap::view_pre_access_slot(const void* key,
@@ -158,17 +146,16 @@ void RegisterMap::bind_view_pre_access(const void* key,
                                        std::string_view name,
                                        std::shared_ptr<const PreFn> callback,
                                        detail::CallbackDescription description) {
+    mutable_bindings();
     auto slot = view_pre_access_slot(key, name);
-    retire_pre_access(slot->callback);
     slot->callback = std::move(callback);
     slot->description = std::move(description);
     emit_resolver_update("pre_access:" + slot->name, slot->description, bool(slot->callback));
 }
 void RegisterMap::clear_view_pre_access(const void* key) {
-    require_initialized();
+    mutable_bindings();
     auto it = access_resolvers_->pre_access.find(key);
     if (it != access_resolvers_->pre_access.end()) {
-        retire_pre_access(it->second->callback);
         it->second->callback.reset();
         emit_resolver_update("pre_access:" + it->second->name, it->second->description, false);
     }
@@ -190,21 +177,21 @@ void RegisterMap::validate_resolver_bindings() const {
                     [](const auto& w) {
                         return !w.resolver;
                     }) &&
-        !identity_resolver_ && !identity_deferred_)
+        !identity_resolver_)
         missing.push_back("identity");
     for (const auto& [key, slot] : access_resolvers_->identities) {
         (void)key;
-        if (slot->required && !slot->callback && !slot->deferred)
+        if (slot->required && !slot->callback)
             missing.push_back("identity:" + slot->name);
     }
     for (const auto& [key, slot] : access_resolvers_->slots) {
         (void)key;
-        if (slot->required && !slot->callback && !slot->deferred)
+        if (slot->required && !slot->callback)
             missing.push_back("index:" + slot->name);
     }
     for (const auto& [key, slot] : access_resolvers_->pre_access) {
         (void)key;
-        if (slot->required && !slot->callback && !slot->deferred)
+        if (slot->required && !slot->callback)
             missing.push_back("pre_access:" + slot->name);
     }
     if (missing.empty())
@@ -229,7 +216,7 @@ RegisterMap::access_resolver_slot(const void* id, std::string_view name) {
     return slot;
 }
 void RegisterMap::clear_access_resolver(const void* id) {
-    require_initialized();
+    mutable_bindings();
     auto it = access_resolvers_->slots.find(id);
     if (it != access_resolvers_->slots.end()) {
         it->second->callback.reset();
@@ -264,11 +251,13 @@ std::string join_name(std::string_view prefix, std::string_view name) {
 }
 void HandleState::ensure_source_available() const {
     auto* n = checked_node();
+    n->owner->mutable_bindings();
     if (n->read_callback || (n->wide && n->wide->wide_read_callback))
         throw Error("on_read already registered: " + n->name, ErrorKind::Configuration);
 }
 void HandleState::ensure_event_available(EventKind kind) const {
     auto* n = checked_node();
+    n->owner->mutable_bindings();
     bool exists = kind == EventKind::Write
                       ? bool(n->write_callback) || (n->wide && bool(n->wide->wide_write_callback))
                       : bool(n->read_complete_callback) ||

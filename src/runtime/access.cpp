@@ -4,7 +4,6 @@
 #include <unordered_set>
 
 namespace reg {
-
 // Address helpers and alias resolution.
 std::uint64_t RegisterMap::checked_map_size(std::uint64_t size) {
     if (!size || size % 4)
@@ -37,6 +36,12 @@ void RegisterMap::mutable_layout() const {
     require_initialized();
     if (finalized_)
         throw Error("register layout is finalized", ErrorKind::Configuration);
+}
+
+void RegisterMap::mutable_bindings() const {
+    require_initialized();
+    if (finalized_)
+        throw Error("callback/resolver bindings are frozen after finish", ErrorKind::Configuration);
 }
 
 void RegisterMap::region_check(std::uint64_t base, std::uint64_t n) const {
@@ -204,7 +209,7 @@ RegisterMap::AddressResolution RegisterMap::resolve_metadata(std::uint64_t addre
             }
     }
     if (hit) {
-        auto fn = (hit->resolver ? hit->resolver->callback : identity_resolver_);
+        const auto* fn = (hit->resolver ? hit->resolver->callback.get() : identity_resolver_.get());
         if (!fn)
             throw Error("identity resolver is not configured", ErrorKind::Configuration);
         IdentityResolveRequest req{hit->domain,
@@ -322,7 +327,8 @@ RegisterMap::Resolution& RegisterMap::resolve_plan(std::uint64_t address,
                     ? std::optional(std::pair{source->identity_request, source->identity_inner})
                     : w.match(address, size, instance);
             if (auto match = matched) {
-                auto fn = (w.resolver ? w.resolver->callback : identity_resolver_);
+                const auto* fn =
+                    (w.resolver ? w.resolver->callback.get() : identity_resolver_.get());
                 if (!fn)
                     throw Error("identity resolver is not configured", ErrorKind::Configuration);
                 IdentityResolveRequest req{w.domain,
@@ -394,7 +400,6 @@ RegisterMap::Resolution& RegisterMap::resolve_plan(std::uint64_t address,
         throw Error("unmapped register address", ErrorKind::Decode);
     auto e = *p;
     auto& n = *e.node;
-    n.check_borrow();
     if (size == 8) {
         auto hi = compiled ? nullptr : lookup_.get(alias.target + 4);
         if (alias.target % 8 || e.byte_offset + 8 > n.value_size ||
@@ -563,7 +568,7 @@ bool RegisterMap::pre(const Node& node,
             log_error(phase, node.name, &info);
         }
     };
-    PreAccessGuard guard(*this);
+
     if (fn)
         try {
             invoke(*fn);
@@ -632,7 +637,7 @@ void RegisterMap::complete_read_event(Resolution& r, WideRegData value, bool sou
         return;
     auto& n = *r.entry.node;
     if (n.is_wide()) {
-        auto callback = n.wide->wide_read_complete_callback;
+        const auto* callback = n.wide->wide_read_complete_callback.get();
         if (callback)
             try {
                 (*callback)(value, r.info);
@@ -640,7 +645,7 @@ void RegisterMap::complete_read_event(Resolution& r, WideRegData value, bool sou
                 log_error("on_read_complete", n.name, &r.info);
             }
     } else {
-        auto callback = n.read_complete_callback;
+        const auto* callback = n.read_complete_callback.get();
         if (callback)
             try {
                 (*callback)(value.low_u64(), r.info);
@@ -675,10 +680,7 @@ RegMmioWriteResult RegisterMap::write_wide(Resolution& r) {
         return {RegMemTxResult::Ignored};
     auto old = n.read_wide(r.entry.linear), mask = values.bus_mask & n.wide->wide_writable_mask;
     WideRegData result;
-    {
-        detail::NodeBorrow borrow(n);
-        result = n.apply_wide_write(old, (old & ~values.bus_mask) | values.bus_data, mask);
-    }
+    result = n.apply_wide_write(old, (old & ~values.bus_mask) | values.bus_data, mask);
     auto after = ((old & ~mask) | (result & mask)) & n.wide_mask();
     n.write_wide(r.entry.linear, after);
     values.stored_before = old;
@@ -686,7 +688,7 @@ RegMmioWriteResult RegisterMap::write_wide(Resolution& r) {
     i.stored_before = old.low_u64();
     i.stored_after = after.low_u64();
     access_log(r, i.stored_after);
-    auto callback = n.wide->wide_write_callback;
+    const auto* callback = n.wide->wide_write_callback.get();
     if (callback)
         try {
             (*callback)(old, i);
@@ -709,17 +711,14 @@ RegMmioReadResult RegisterMap::read_wide(Resolution& r) {
         return {REG_READ_CALLBACK_ERROR_MAGIC & detail::low_mask(i.size * 8)};
     auto before = n.read_wide(r.entry.linear), after = before;
     WideRegData returned;
-    {
-        detail::NodeBorrow borrow(n);
-        returned = n.apply_wide_read(after, values.bus_mask) & n.wide_mask();
-    }
+    returned = n.apply_wide_read(after, values.bus_mask) & n.wide_mask();
     after &= n.wide_mask();
     n.write_wide(r.entry.linear, after);
     values.stored_before = before;
     values.stored_after = after;
     i.stored_before = before.low_u64();
     i.stored_after = after.low_u64();
-    auto callback = n.wide->wide_read_callback;
+    const auto* callback = n.wide->wide_read_callback.get();
     bool source_ok = true;
     if (callback)
         try {
@@ -792,7 +791,6 @@ RegMmioWriteResult RegisterMap::write_transaction(Resolution& r) {
         mask & (n.is_wide() ? n.wide->wide_writable_mask : WideRegData(n.writable_mask));
     WideRegData result;
     {
-        detail::NodeBorrow borrow(n);
         auto merged = (old & ~mask) | pending;
         if (n.is_wide())
             result = n.apply_wide_write(old, merged, effective);
@@ -811,7 +809,7 @@ RegMmioWriteResult RegisterMap::write_transaction(Resolution& r) {
     i.stored_after = after.low_u64();
     access_log(r, i.stored_after, "commit-write");
     if (n.is_wide()) {
-        auto callback = n.wide->wide_write_callback;
+        const auto* callback = n.wide->wide_write_callback.get();
         if (callback)
             try {
                 (*callback)(old, i);
@@ -819,7 +817,7 @@ RegMmioWriteResult RegisterMap::write_transaction(Resolution& r) {
                 log_error("on_write", n.name, &i);
             }
     } else {
-        auto callback = n.write_callback;
+        const auto* callback = n.write_callback.get();
         if (callback)
             try {
                 (*callback)(old.low_u64(), i);
@@ -871,7 +869,6 @@ RegMmioReadResult RegisterMap::read_transaction(Resolution& r) {
         auto before = read_storage(n, r.entry.linear), after = before;
         auto all = WideRegData::mask(n.value_size * 8);
         {
-            detail::NodeBorrow borrow(n);
             if (n.is_wide())
                 returned = n.apply_wide_read(after, all) & all;
             else {
@@ -888,7 +885,7 @@ RegMmioReadResult RegisterMap::read_transaction(Resolution& r) {
         i.stored_after = after.low_u64();
         bool failed = false;
         if (n.is_wide()) {
-            auto callback = n.wide->wide_read_callback;
+            const auto* callback = n.wide->wide_read_callback.get();
             if (callback)
                 try {
                     returned = (*callback)(returned, i) & all;
@@ -897,7 +894,7 @@ RegMmioReadResult RegisterMap::read_transaction(Resolution& r) {
                     failed = true;
                 }
         } else {
-            auto callback = n.read_callback;
+            const auto* callback = n.read_callback.get();
             if (callback)
                 try {
                     returned = WideRegData((*callback)(returned.low_u64(), i)) & all;
@@ -956,8 +953,6 @@ RegisterMap::fast_scalar(std::uint64_t address, RegData value, const CompiledAcc
     // Entry validation and immutable path selection were done by dispatch.
     constexpr bool writing = Writing;
     auto& n = *selected->node;
-    if (n.borrowed)
-        return {};
     if (logger_ && n.log_policy != LogPolicy::Hidden &&
         (log_enabled(HLOG_LEVEL_DEBUG) || log_enabled(HLOG_LEVEL_TRACE)))
         return {};
@@ -1042,7 +1037,7 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const CompiledA
     std::optional<AccessIdentity> identity;
     if (source->identity_index) {
         const auto& w = identities_[*source->identity_index];
-        auto fn = (w.resolver ? w.resolver->callback : identity_resolver_);
+        const auto* fn = (w.resolver ? w.resolver->callback.get() : identity_resolver_.get());
         if (!fn)
             throw Error("identity resolver is not configured", ErrorKind::Configuration);
         IdentityResolveRequest req{w.domain,
@@ -1088,7 +1083,6 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const CompiledA
     }
     auto entry = *target->target_entry;
     auto& n = *entry.node;
-    n.check_borrow();
     // Identity resolution has already selected the storage. If no following
     // operation consumes access info, avoid constructing any callback context.
     if (!n.single_index && !pre_access_ && !target->pre_access_chain && !logger_ &&
@@ -1238,7 +1232,7 @@ std::optional<RegData> RegisterMap::fast_scalar_resolved(Resolution& r, bool wri
     const auto& e = r.entry;
     auto& n = *e.node;
     if (r.info.size != 4 || e.byte_offset || !(n.scalar32_directions & (writing ? 2 : 1)) ||
-        n.borrowed || pre_access_ || r.alias.pre_access_chain)
+        pre_access_ || r.alias.pre_access_chain)
         return {};
     if (logger_ && n.log_policy != LogPolicy::Hidden &&
         (log_enabled(HLOG_LEVEL_DEBUG) || log_enabled(HLOG_LEVEL_TRACE)))
@@ -1314,7 +1308,6 @@ RegData RegisterMap::scalar32_events(const Entry& e,
 RegMmioWriteResult
 RegisterMap::try_mmio_write_sized(std::uint64_t address, RegData value, unsigned size) {
     try {
-        DispatchGuard guard(*this);
         warn_truncated_write(address, value, size);
         const CompiledAccess* plan = nullptr;
         if (finalized_ && size == 4 && !(address & 3)) {
@@ -1365,15 +1358,12 @@ RegisterMap::try_mmio_write_sized(std::uint64_t address, RegData value, unsigned
         auto index = r.entry.linear;
         auto old = n.read_scalar(index), mask = i.bus_mask & n.writable_mask;
         RegData result;
-        {
-            detail::NodeBorrow borrow(n);
-            result = n.apply_write(old, (old & ~i.bus_mask) | i.bus_data, mask);
-        }
+        result = n.apply_write(old, (old & ~i.bus_mask) | i.bus_data, mask);
         n.write_scalar(index, ((old & ~mask) | (result & mask)) & n.value_mask());
         i.stored_before = old;
         i.stored_after = n.read_scalar(index);
         access_log(r, i.stored_after);
-        auto fn = n.write_callback;
+        const auto* fn = n.write_callback.get();
         if (fn)
             try {
                 (*fn)(old, i);
@@ -1398,7 +1388,6 @@ RegMmioReadResult RegisterMap::try_mmio_read_sized(std::uint64_t address, unsign
                              ? INVALID_READ_VALUE & detail::low_mask(size * 8)
                              : 0;
     try {
-        DispatchGuard guard(*this);
         const CompiledAccess* plan = nullptr;
         if (finalized_ && size == 4 && !(address & 3)) {
             if (compiled_view_mode_)
@@ -1445,15 +1434,12 @@ RegMmioReadResult RegisterMap::try_mmio_read_sized(std::uint64_t address, unsign
         auto shift = i.internal_byte_offset * 8;
         auto before = n.read_scalar(index), after = before;
         RegData returned;
-        {
-            detail::NodeBorrow borrow(n);
-            returned = n.apply_read(after, i.bus_mask) & n.value_mask();
-        }
+        returned = n.apply_read(after, i.bus_mask) & n.value_mask();
         if (!n.scalar_data || n.custom_behavior || after != before)
             n.write_scalar(index, after & n.value_mask());
         i.stored_before = before;
         i.stored_after = n.scalar_data ? (after & n.value_mask()) : n.read_scalar(index);
-        auto fn = n.read_callback;
+        const auto* fn = n.read_callback.get();
         bool source_ok = true;
         if (fn)
             try {

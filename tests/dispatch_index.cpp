@@ -28,8 +28,25 @@ struct Layout : reg::Bundle {
 } // namespace
 int main() try {
     reg::RegisterBank<Layout> bank(reg::space().name("INDEX"));
-    bank.finish();
     auto& m = bank.map();
+    unsigned events = 0, pre = 0;
+    bool correct = true, observe = false, pre_enabled = false, read_adjust = false;
+    bank->values.GRID.on_write([&](const reg::RegAccessInfo& i) {
+        if (!observe)
+            return;
+        ++events;
+        correct &= i.address == BASE + STEP + 4 && i.index.linear() == 1 && i.stored_after == 55;
+    });
+    m.set_pre_access([&](const auto&) {
+        if (pre_enabled)
+            ++pre;
+    });
+    bank->values.GRID.on_read([&](std::uint32_t v, const auto& i) {
+        if (read_adjust)
+            correct &= i.index.get() == 1;
+        return v + unsigned(read_adjust);
+    });
+    bank.finish();
     for (unsigned i = 0; i < 128; ++i) {
         const auto a = BASE + i * STEP + i * 4;
         const auto previous = bank->values.GRID.at(i).ref();
@@ -45,23 +62,12 @@ int main() try {
     m.mmio_write(HIGH, 77);
     bank.load(saved);
     CHECK(m.mmio_read(HIGH) == 0);
-    unsigned events = 0, pre = 0;
-    bool correct = true;
-    bank->values.GRID.on_write([&](const reg::RegAccessInfo& i) {
-        ++events;
-        correct = correct && i.address == BASE + STEP + 4 && i.index.linear() == 1 &&
-                  i.stored_after == 55;
-    });
+    observe = true;
     CHECK(m.mmio_write(BASE + STEP + 4, 55).success() && events == 1 && correct);
-    m.set_pre_access([&](const auto&) {
-        ++pre;
-    });
+    pre_enabled = true;
     CHECK(m.mmio_read(BASE + STEP + 4) == 55 && pre == 1);
-    m.clear_pre_access();
-    bank->values.GRID.on_read([&](std::uint32_t v, const auto& i) {
-        correct = correct && i.index.get() == 1;
-        return v + 1;
-    });
+    pre_enabled = false;
+    read_adjust = true;
     CHECK(m.mmio_read(BASE + STEP + 4) == 56 && correct && pre == 1);
     bank->values.GRID.reset();
     CHECK(bank->values.GRID.at(1).ref() == 0);

@@ -1,3 +1,15 @@
+# 单线程固定生命周期分支迁移
+
+本分支面向固定生命周期、单线程 QEMU SysBus 设备，基于无异步队列的 0.37。初始化顺序是：建立 bank → 注册全部 identity/index resolver、pre_access、读写/完成回调 → `finish()` → MMIO。`finish()` 同时冻结布局与绑定；之后 set/clear/首次注册均抛 Configuration，`defer_*` 不再允许未绑定依赖通过 finish。函数捕获的路由表、寄存器值及 logger 等级仍可变化，resolver 结果仍逐次求值。
+
+RegView 只借用实体存储，不持有生命周期计数，也不检测 bank 销毁。使用 view、原生引用及 bridge 时必须保持 bank 存活；移动 bank 保持实体地址。`is_alive()` 仅表示句柄已绑定。框架不再维护 MMIO 重入、entity borrow 或钩子退休保护；同一 map 的 MMIO/save/load 不可在回调中递归进入。这些是本分支的使用前提，不是运行时保护。
+
+流快照 `ar(bank)` / `bank.save(file)` 改为紧凑格式：布局 hash、实际位宽的实体值及活动事务，省去 schema 明细。无参 `bank.save()` 仍返回完整 `VersionedSnapshot` v2，供内存检查与兼容用途。旧版 bank 流不能直接由新版 load 读取，需要重新生成或在旧版解析为 VersionedSnapshot 后显式加载。头文件、库和设备必须配套重编译。详情见 [固定生命周期优化](Performance-Fixed-Lifetime.md) 和 [快照格式](Snapshot.md)。
+
+已有代码若全部在 finish 前完成绑定，调用点无需修改。使用构造参数 `.finalize()` 的设备若还要注册回调，去掉该参数，在注册完毕后调用现有 `bank.finish()`。建议同步更新 `extras/vmstate_fields.hpp` 的公开 Bytes 批量入口，保留工程自己的 qemu_interface.h；旧 archive 无 Bytes 时自动逐 word 读写同一紧凑 payload。
+
+以下为历史版本迁移记录，涉及换绑、过期检查和流格式的旧说明由本节取代。
+
 # 0.36.0 的内部建表迁移
 
 正式生产后端是原生单遍布局生成 + 共享 EntityLayout Hash。公开 API、DSL、MMIO、Snapshot 均不变；依赖 `reg::detail::compile_formula_layout` 的私有代码必须迁移到 `reg::detail::build_formula_layout_runtime`，但设备业务源码不应依赖这些私有符号。几何布局错误从编译期诊断迁为初始化期配置错误。
