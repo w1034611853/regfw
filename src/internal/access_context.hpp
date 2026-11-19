@@ -30,18 +30,6 @@ struct RegisterMap::InstanceWindow {
     std::uint64_t base, size;
     std::uint32_t instance;
 };
-struct RegisterMap::CompiledAccess {
-    const AliasEntry* metadata{};
-    Node* node{};
-    const detail::ScalarAccessSite* scalar_site{};
-    const RegElementIndex* scalar_index{};
-    std::uint64_t scalar_target{};
-    std::uint32_t linear{};
-    std::byte* scalar{};
-    std::uint32_t mask{};
-    enum class Path : std::uint8_t { Generic, Scalar, Mapped };
-    Path path{};
-};
 struct RegisterMap::Resolution {
     Entry entry;
     struct Route {
@@ -60,7 +48,7 @@ struct RegisterMap::AccessScratch {
     // Formula decoding scratch: [0] holds the selected view entry, [1] the
     // identity RedirectBank target. Both live only within one dispatch.
     RegisterMap::AliasEntry decoded[2]{};
-    RegisterMap::CompiledAccess decoded_access{};
+    // Direct callbacks share default route and policy. Only the source instance varies.
     detail::ScalarAccessSite direct_site{};
     AccessScratch() {
         resolution.info.index_fields.borrow(index);

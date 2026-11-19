@@ -327,7 +327,7 @@ void FormulaDecoder::install_dynamic(RegisterMap* map,
 
 // ---------------------------------------------------------------------------
 // FormulaInstaller: binds entities, installs scopes/identities/pre-access and
-// the compact decoder. No per-word AliasEntry/CompiledAccess is produced.
+// the compact decoder. Per-access aliases are assembled from the selected mount.
 // ---------------------------------------------------------------------------
 class FormulaInstaller {
     static void install_identity_families(RegisterMap& map,

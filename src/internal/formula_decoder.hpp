@@ -7,6 +7,7 @@ namespace detail {
 // dense table or hash + an instance-bound context. No per-access caches.
 class FormulaDecoder {
   public:
+    enum class Path : std::uint8_t { Generic, Scalar, Mapped };
     static constexpr std::size_t max_redirect_targets = 64;
     struct Scope {
         std::uint32_t parent = STATIC_NONE;
@@ -35,9 +36,6 @@ class FormulaDecoder {
         EntityState* node{};
         std::uint64_t canonical_base{};
         std::uint32_t linear{};
-        std::uint32_t writable_mask{std::uint32_t(~std::uint32_t{0})};
-        std::size_t scalar_stride{};
-        std::byte* scalar_data{};
         std::uint8_t scalar32_directions{};
         bool has_derivations{}, single_index{}, single_metadata_only{};
     };
@@ -113,7 +111,6 @@ class FormulaDecoder {
         const ViewPreAccessChain* pre_access_chain{};
         std::uint32_t identity_index{STATIC_NONE};
         std::int32_t priority{};
-        using Path = RegisterMap::CompiledAccess::Path;
         Path read_path{}, write_path{};
         // A fast identity mount lies entirely within one window instance.
         std::uint32_t request_id{};
@@ -421,6 +418,8 @@ class FormulaDecoder {
         }
         return winner != nullptr;
     }
+
+  public:
     bool find_prepared(std::uint64_t word, PreparedHit& hit) const noexcept {
         if (!lookup_prepared(word, hit))
             return false;
@@ -436,7 +435,6 @@ class FormulaDecoder {
         return true;
     }
     // Formula geometry is immutable after installation; address lookup has no mutable caches.
-  public:
     FormulaDecoder() = default;
 
     // One prepared Hash hit supplies the REG address, all coordinates, and a
@@ -508,9 +506,6 @@ class FormulaDecoder {
         prepare_identity_targets();
         for (auto& b : bindings_) {
             const auto& n = *b.node;
-            b.writable_mask = static_cast<std::uint32_t>(n.writable_mask);
-            b.scalar_stride = n.scalar_stride;
-            b.scalar_data = n.scalar_data;
             b.scalar32_directions = n.scalar32_directions;
             b.has_derivations = !n.derivations.empty();
             b.single_index = bool(n.single_index);
@@ -562,7 +557,6 @@ class FormulaDecoder {
                 const auto policy =
                     (context.policy.allow_read ? 1 : 0) | (context.policy.allow_write ? 2 : 0);
                 scalar &= policy;
-                using Path = RegisterMap::CompiledAccess::Path;
                 const auto scalar_path =
                     owner_->pre_access_ || context.pre_access_chain ? Path::Mapped : Path::Scalar;
                 auto path = [&](unsigned direction) {
@@ -582,34 +576,6 @@ class FormulaDecoder {
             return nullptr;
         fill_prepared(hit, word, out);
         return &out;
-    }
-    const RegisterMap::CompiledAccess* fast_access(std::uint64_t address,
-                                                   bool writing,
-                                                   RegisterMap::AccessScratch& scratch,
-                                                   PreparedHit& hit) const {
-        if (!find_prepared(address, hit))
-            return nullptr;
-        const auto& context = *hit.context;
-        auto& plan = scratch.decoded_access;
-        plan.metadata = nullptr;
-        plan.path = writing ? context.write_path : context.read_path;
-        using Path = RegisterMap::CompiledAccess::Path;
-        if (plan.path == Path::Scalar) {
-            const auto& binding = *context.binding;
-            plan.node = context.node;
-            plan.linear = binding.linear + hit.access->linear;
-            plan.scalar = binding.scalar_data + std::size_t(plan.linear) * binding.scalar_stride;
-            plan.mask = binding.writable_mask;
-            plan.scalar_site = &context;
-            plan.scalar_index = &hit.access->index;
-            plan.scalar_target = hit.canonical(address);
-        } else if (plan.path == Path::Generic) {
-            auto& out = scratch.decoded[0];
-            fill_prepared(hit, address, out);
-            plan.metadata = &out;
-        }
-        // Mapped accesses consume the immutable mount and coordinate directly.
-        return &plan;
     }
     // Legacy scope ordering: deeper scopes win ties, higher priority wins at
     // the first divergent view level.

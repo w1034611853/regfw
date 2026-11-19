@@ -107,6 +107,45 @@ void equivalent() {
     fast->regs.VALUE.reset();
     CHECK(fast.map().mmio_read(A) == 0);
 }
+void scalar_logged_alias() {
+    reg::RegisterBank<Layout> bank(reg::space().name("SCALAR_LOG_ALIAS"));
+    auto* logger = hlog_register_logger("aliasfallback", "regfw-alias-fallback", HLOG_LEVEL_TRACE);
+    CHECK(logger);
+    bank.map().set_logger(logger);
+    auto& array = bank->regs.ARRAY;
+    array.at(1).ref() = 41;
+    unsigned calls = 0;
+    reg::RegAccessInfo saved;
+    array.on_read([&](std::uint32_t value, const reg::RegAccessInfo& info) {
+        ++calls;
+        saved = info;
+        return value + 1;
+    });
+    bank.finish();
+    const auto canonical = bank.map().resolve_address(A + 72, 4);
+    for (const auto base : {A, B}) {
+        CHECK(bank.map().mmio_read(base + 72) == 42);
+        CHECK(saved.is_read() && saved.size == 4 && saved.address == base + 72 &&
+              saved.alias_resolved_address == canonical && saved.resolved_address == canonical &&
+              saved.index.linear() == 1 && saved.stored_before == 41);
+    }
+    CHECK(calls == 2);
+}
+
+void direct_scalar_instance() {
+    reg::RegisterMap map(0x200, "DIRECT");
+    auto vf = reg::build<R>(reg::RegScope(map, 0, 0x100, "VF", {}, 7));
+    auto pf = reg::build<R>(reg::RegScope(map, 0x100, 0x100, "PF"));
+    std::optional<std::uint32_t> instance;
+    auto capture = [&](const reg::RegAccessInfo& info) {
+        instance = info.source_instance;
+    };
+    vf.VALUE.on_write(capture);
+    pf.VALUE.on_write(capture);
+    map.finalize();
+    CHECK(map.mmio_write(0, 1).success() && instance == 7);
+    CHECK(map.mmio_write(0x100, 2).success() && !instance);
+}
 void callback_state_and_frames() {
     reg::RegisterBank<Layout> b(reg::space().name("FRAMES"));
     auto& m = b.map();
@@ -635,6 +674,8 @@ void legacy_scalar_equivalence() {
 int main() try {
     equivalent();
     legacy_scalar_equivalence();
+    scalar_logged_alias();
+    direct_scalar_instance();
     callback_state_and_frames();
     fixed_bindings();
     callback_errors_and_dynamic_logging();

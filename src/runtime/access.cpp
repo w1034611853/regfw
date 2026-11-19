@@ -893,60 +893,39 @@ RegMmioReadResult RegisterMap::read_transaction(Resolution& r) {
 }
 
 // Scalar and mapped fast paths (preserve the same callback/transaction semantics).
-// Legacy direct maps already have a word-to-entity lookup. Reuse the scalar
-// executor instead of constructing an alias route and a complete Resolution.
-const RegisterMap::CompiledAccess* RegisterMap::direct_scalar(std::uint64_t address, bool writing) {
-    const auto* entry = lookup_.get(address);
-    if (!entry || entry->byte_offset)
-        return nullptr;
-    auto& n = *entry->node;
-    if (!n.scalar32_directions || !n.derivations.empty())
-        return nullptr;
-    auto& plan = access_scratch_->decoded_access;
-    auto& site = access_scratch_->direct_site;
-    plan.metadata = nullptr;
-    plan.node = &n;
-    plan.scalar = n.scalar_data + std::size_t(entry->linear) * n.scalar_stride;
-    plan.mask = static_cast<std::uint32_t>(n.writable_mask);
-    plan.linear = entry->linear;
-    plan.scalar_site = &site;
-    plan.scalar_index = &entry->view->elements[entry->linear].index;
-    plan.scalar_target = address;
-    site.instance = entry->source_instance;
-    using Path = CompiledAccess::Path;
-    plan.path = n.scalar32_directions & (writing ? 2 : 1) ? Path::Scalar : Path::Generic;
-    return &plan;
-}
-
 template <bool Writing>
-REGFW_DETAIL_ALWAYS_INLINE inline std::optional<RegData>
-RegisterMap::fast_scalar(std::uint64_t address, RegData value, const CompiledAccess* selected) {
-    // Entry validation and immutable path selection were done by dispatch.
+REGFW_DETAIL_ALWAYS_INLINE inline std::optional<RegMmioReadResult>
+RegisterMap::fast_scalar(std::uint64_t address,
+                         RegData value,
+                         Node& n,
+                         std::uint32_t linear,
+                         const detail::ScalarAccessSite& site,
+                         const RegElementIndex& index,
+                         std::uint64_t target) {
     constexpr bool writing = Writing;
-    auto& n = *selected->node;
     if (access_log_level(n) != HLOG_LEVEL_OFF)
         return {};
-    auto* p = selected->scalar;
+    auto* p = n.scalar_data + std::size_t(linear) * n.scalar_stride;
     std::uint32_t stored;
     std::memcpy(&stored, p, 4);
-    auto mask = selected->mask;
+    auto mask = static_cast<std::uint32_t>(n.writable_mask);
     auto after = (stored & ~mask) | (std::uint32_t(value) & mask);
     if (writing && !n.write_callback) {
         std::memcpy(p, &after, 4);
-        return RegData{};
+        return RegMmioReadResult{};
     }
     if (!writing && !n.read_callback && !n.read_complete_callback)
-        return RegData(stored);
+        return RegMmioReadResult{stored};
 
-    detail::ScalarAccessFrame frame{selected->scalar_site,
+    detail::ScalarAccessFrame frame{&site,
                                     address,
                                     writing ? std::uint32_t(value) : 0,
                                     stored,
                                     writing ? after : stored,
                                     writing ? RegTransactionKind::Write : RegTransactionKind::Read,
                                     nullptr,
-                                    selected->scalar_index,
-                                    selected->scalar_target};
+                                    &index,
+                                    target};
     auto report = [&](std::string_view phase) {
         if (log_enabled(HLOG_LEVEL_ERROR)) {
             RegAccessInfo i;
@@ -961,7 +940,7 @@ RegisterMap::fast_scalar(std::uint64_t address, RegData value, const CompiledAcc
         } catch (...) {
             report("on_write");
         }
-        return RegData{};
+        return RegMmioReadResult{};
     }
     RegData returned = stored;
     bool source_ok = true;
@@ -976,7 +955,7 @@ RegisterMap::fast_scalar(std::uint64_t address, RegData value, const CompiledAcc
     if (const auto level = access_log_level(n); level != HLOG_LEVEL_OFF) {
         RegAccessInfo i;
         frame.fill(i);
-        emit_log({level, "Read", n.layout().elements[selected->linear].name, &i, returned, {}, {}});
+        emit_log({level, "Read", n.layout().elements[linear].name, &i, returned, {}, {}});
     }
     if (source_ok)
         if (auto* fn = n.read_complete_callback.get())
@@ -985,7 +964,7 @@ RegisterMap::fast_scalar(std::uint64_t address, RegData value, const CompiledAcc
             } catch (...) {
                 report("on_read_complete");
             }
-    return returned;
+    return RegMmioReadResult{returned};
 }
 
 template <bool Writing, class Selection>
@@ -1266,32 +1245,69 @@ std::optional<RegData> RegisterMap::fast_scalar_resolved(Resolution& r, bool wri
     return returned;
 }
 
+template <bool Writing>
+REGFW_DETAIL_ALWAYS_INLINE inline std::optional<RegMmioReadResult> RegisterMap::try_fast_mmio(
+    std::uint64_t address, RegData value, unsigned size, const AliasEntry*& selected) {
+    if (!finalized_ || size != 4 || (address & 3))
+        return {};
+
+    detail::FormulaDecoder::PreparedHit hit;
+    Node* node = nullptr;
+    std::uint32_t linear;
+    const detail::ScalarAccessSite* site;
+    const RegElementIndex* index;
+    auto target = address;
+    if (formula_) {
+        if (!formula_->find_prepared(address, hit))
+            return {};
+        const auto& context = *hit.context;
+        using Path = detail::FormulaDecoder::Path;
+        const auto path = Writing ? context.write_path : context.read_path;
+        if (path == Path::Mapped)
+            return mapped_scalar<Writing>(address, value, hit);
+        if (path == Path::Scalar) {
+            node = context.node;
+            linear = context.binding->linear + hit.access->linear;
+            site = &context;
+            index = &hit.access->index;
+            target = hit.canonical(address);
+        }
+    } else {
+        if (!direct_scalar_mode_ || pre_access_)
+            return {};
+        const auto* entry = lookup_.get(address);
+        if (!entry || entry->byte_offset)
+            return {};
+        node = entry->node;
+        if (!(node->scalar32_directions & (Writing ? 2 : 1)) || !node->derivations.empty())
+            return {};
+        auto& direct = access_scratch_->direct_site;
+        direct.instance = entry->source_instance;
+        site = &direct;
+        linear = entry->linear;
+        index = &entry->view->elements[linear].index;
+    }
+    if (node)
+        if (auto result =
+                fast_scalar<Writing>(address, value, *node, linear, *site, *index, target))
+            return result;
+    if (hit.context) {
+        // A generic access (including enabled access logging) reuses the initial hit.
+        auto& entry = access_scratch_->decoded[0];
+        formula_->fill_prepared(hit, address, entry);
+        selected = &entry;
+    }
+    return {};
+}
+
 // Public MMIO entry points and QEMU adapters.
 RegMmioWriteResult
 RegisterMap::try_mmio_write_sized(std::uint64_t address, RegData value, unsigned size) {
     try {
         warn_truncated_write(address, value, size);
-        detail::FormulaDecoder::PreparedHit hit{};
-        const CompiledAccess* plan = nullptr;
-        if (finalized_ && size == 4 && !(address & 3)) {
-            if (formula_)
-                plan = formula_->fast_access(address, true, *access_scratch_, hit);
-            else if (direct_scalar_mode_ && !pre_access_)
-                plan = direct_scalar(address, true);
-        }
-        const auto* selected = plan ? plan->metadata : nullptr;
-        if (plan) {
-            switch (plan->path) {
-                case CompiledAccess::Path::Scalar:
-                    if (fast_scalar<true>(address, value, plan))
-                        return {};
-                    break;
-                case CompiledAccess::Path::Mapped:
-                    return {mapped_scalar<true>(address, value, hit).result};
-                case CompiledAccess::Path::Generic:
-                    break;
-            }
-        }
+        const AliasEntry* selected = nullptr;
+        if (auto fast = try_fast_mmio<true>(address, value, size, selected))
+            return {fast->result};
         auto& r = resolve(address, size, RegTransactionKind::Write, value, selected);
         auto& n = *r.entry.node;
         auto& i = r.info;
@@ -1349,27 +1365,9 @@ RegMmioReadResult RegisterMap::try_mmio_read_sized(std::uint64_t address, unsign
                              ? INVALID_READ_VALUE & detail::low_mask(size * 8)
                              : 0;
     try {
-        detail::FormulaDecoder::PreparedHit hit{};
-        const CompiledAccess* plan = nullptr;
-        if (finalized_ && size == 4 && !(address & 3)) {
-            if (formula_)
-                plan = formula_->fast_access(address, false, *access_scratch_, hit);
-            else if (direct_scalar_mode_ && !pre_access_)
-                plan = direct_scalar(address, false);
-        }
-        const auto* selected = plan ? plan->metadata : nullptr;
-        if (plan) {
-            switch (plan->path) {
-                case CompiledAccess::Path::Scalar:
-                    if (auto fast = fast_scalar<false>(address, 0, plan))
-                        return {*fast};
-                    break;
-                case CompiledAccess::Path::Mapped:
-                    return mapped_scalar<false>(address, 0, hit);
-                case CompiledAccess::Path::Generic:
-                    break;
-            }
-        }
+        const AliasEntry* selected = nullptr;
+        if (auto fast = try_fast_mmio<false>(address, 0, size, selected))
+            return *fast;
         auto& r = resolve(address, size, RegTransactionKind::Read, 0, selected);
         auto& n = *r.entry.node;
         auto& i = r.info;

@@ -873,7 +873,6 @@ class RegisterMap {
     using Node = detail::EntityState;
     struct Entry;
     struct AliasEntry;
-    struct CompiledAccess;
     struct AliasHop;
     struct Resolution;
     struct AddressResolution;
@@ -987,10 +986,17 @@ class RegisterMap {
                              RegTransactionKind kind,
                              RegData value,
                              const AliasEntry* selected);
-    const CompiledAccess* direct_scalar(std::uint64_t address, bool writing);
     template <bool Writing>
-    std::optional<RegData>
-    fast_scalar(std::uint64_t address, RegData value, const CompiledAccess* selected);
+    std::optional<RegMmioReadResult>
+    try_fast_mmio(std::uint64_t address, RegData value, unsigned size, const AliasEntry*& selected);
+    template <bool Writing>
+    std::optional<RegMmioReadResult> fast_scalar(std::uint64_t address,
+                                                 RegData value,
+                                                 Node& node,
+                                                 std::uint32_t linear,
+                                                 const detail::ScalarAccessSite& site,
+                                                 const RegElementIndex& index,
+                                                 std::uint64_t target);
     std::optional<RegData> fast_scalar_resolved(Resolution& r, bool writing);
     template <bool Writing, class Selection>
     RegMmioReadResult mapped_scalar(std::uint64_t address, RegData value, const Selection& source);
