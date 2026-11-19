@@ -32,6 +32,37 @@ void RegisterMap::warn_truncated_write(std::uint64_t address,
     emit_log(record);
 }
 
+void RegisterMap::log_frame(HLogLevel level,
+                            std::string_view phase,
+                            std::string_view name,
+                            const detail::ScalarAccessFrame& frame,
+                            RegData value) const noexcept {
+    frame.with_info([&](const RegAccessInfo& info) {
+        emit_log({level, phase, name, &info, value, {}, {}});
+    });
+}
+
+void RegisterMap::log_error(std::string_view phase,
+                            std::string_view name,
+                            const detail::ScalarAccessFrame& frame) const noexcept {
+    if (log_enabled(HLOG_LEVEL_ERROR))
+        frame.with_info([&](const RegAccessInfo& info) {
+            log_error(phase, name, &info);
+        });
+}
+
+void RegisterMap::log_error(std::string_view phase,
+                            std::string_view name,
+                            const RegAccessInfo* info) const noexcept {
+    if (!log_enabled(HLOG_LEVEL_ERROR))
+        return;
+    try {
+        auto text = format_error_chain(std::current_exception());
+        emit_log({HLOG_LEVEL_ERROR, phase, name, info, 0, {}, text});
+    } catch (...) {
+    }
+}
+
 void RegisterMap::log_request_error(RegTransactionKind kind,
                                     std::uint64_t address,
                                     RegData value,

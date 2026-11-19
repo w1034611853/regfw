@@ -535,11 +535,8 @@ bool RegisterMap::pre(const Node& node,
     auto report = [&](std::string_view phase) {
         if constexpr (std::same_as<Context, RegAccessInfo>)
             log_error(phase, node.name, &context);
-        else if (log_enabled(HLOG_LEVEL_ERROR)) {
-            auto& info = access_scratch_->resolution.info;
-            context.fill(info);
-            log_error(phase, node.name, &info);
-        }
+        else
+            log_error(phase, node.name, context);
     };
 
     if (fn)
@@ -590,18 +587,6 @@ void RegisterMap::access_log(const Resolution& r,
               action,
               {},
               r.identity ? &*r.identity : nullptr});
-}
-
-void RegisterMap::log_error(std::string_view phase,
-                            std::string_view name,
-                            const RegAccessInfo* info) const noexcept {
-    if (!log_enabled(HLOG_LEVEL_ERROR))
-        return;
-    try {
-        auto text = format_error_chain(std::current_exception());
-        emit_log({HLOG_LEVEL_ERROR, phase, name, info, 0, {}, text});
-    } catch (...) {
-    }
 }
 
 void RegisterMap::complete_read_event(Resolution& r, WideRegData value, bool source_ok) {
@@ -926,19 +911,12 @@ RegisterMap::fast_scalar(std::uint64_t address,
                                     nullptr,
                                     &index,
                                     target};
-    auto report = [&](std::string_view phase) {
-        if (log_enabled(HLOG_LEVEL_ERROR)) {
-            RegAccessInfo i;
-            frame.fill(i);
-            log_error(phase, n.name, &i);
-        }
-    };
     if (writing) {
         std::memcpy(p, &after, 4);
         try {
             n.write_callback->from_frame(stored, frame);
         } catch (...) {
-            report("on_write");
+            log_error("on_write", n.name, frame);
         }
         return RegMmioReadResult{};
     }
@@ -948,21 +926,18 @@ RegisterMap::fast_scalar(std::uint64_t address,
         try {
             returned = fn->from_frame(returned, frame) & 0xffffffff;
         } catch (...) {
-            report("on_read");
+            log_error("on_read", n.name, frame);
             returned = REG_READ_CALLBACK_ERROR_MAGIC & 0xffffffff;
             source_ok = false;
         }
-    if (const auto level = access_log_level(n); level != HLOG_LEVEL_OFF) {
-        RegAccessInfo i;
-        frame.fill(i);
-        emit_log({level, "Read", n.layout().elements[linear].name, &i, returned, {}, {}});
-    }
+    if (const auto level = access_log_level(n); level != HLOG_LEVEL_OFF)
+        log_frame(level, "Read", n.layout().elements[linear].name, frame, returned);
     if (source_ok)
         if (auto* fn = n.read_complete_callback.get())
             try {
                 fn->from_frame(returned, frame);
             } catch (...) {
-                report("on_read_complete");
+                log_error("on_read_complete", n.name, frame);
             }
     return RegMmioReadResult{returned};
 }
@@ -1072,25 +1047,14 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
     };
     if (!deferred)
         populate();
-    auto resolution = [&]() -> Resolution& {
-        auto& r = access_scratch_->resolution;
-        r.entry = {&n, linear, 0, bound.instance, bound.node_layout, &coordinate};
-        r.identity = identity;
-        r.alias = {target_address, route, policy, bound.pre_access_chain};
-        frame.fill(r.info);
-        return r;
-    };
     const auto invalid = INVALID_READ_VALUE & 0xffffffff;
     if (!allowed) {
-        auto& r = resolution();
-        emit_log({HLOG_LEVEL_WARN,
-                  writing ? "alias write denied" : "alias read denied",
-                  n.name,
-                  &r.info,
-                  writing ? value : 0,
-                  {},
-                  {},
-                  nullptr});
+        if (log_enabled(HLOG_LEVEL_WARN))
+            log_frame(HLOG_LEVEL_WARN,
+                      writing ? "alias write denied" : "alias read denied",
+                      n.name,
+                      frame,
+                      writing ? value : 0);
         const auto action = writing ? policy.denied_write : policy.denied_read;
         return RegMmioReadResult{writing ? 0 : invalid,
                                  action == DeniedAccessAction::Ignore
@@ -1102,8 +1066,7 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
             if (log_enabled(HLOG_LEVEL_ERROR)) {
                 if (deferred)
                     populate();
-                auto& r = resolution();
-                log_error("access mapping/validation", n.name, &r.info);
+                log_error("access mapping/validation", n.name, frame);
             }
             return RegMmioReadResult{writing ? 0 : invalid, result};
         };
@@ -1147,16 +1110,12 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
     const auto before = plan || hooks ? word_at(linear) : logical_before;
     frame.before = frame.after = before;
     auto log = [&](RegData returned) {
-        if (access_log_level(n) != HLOG_LEVEL_OFF) {
-            auto& r = resolution();
-            access_log(r, returned);
-        }
-    };
-    auto error = [&](std::string_view phase) {
-        if (log_enabled(HLOG_LEVEL_ERROR)) {
-            auto& r = resolution();
-            log_error(phase, n.name, &r.info);
-        }
+        if (const auto level = access_log_level(n); level != HLOG_LEVEL_OFF)
+            log_frame(level,
+                      writing ? "Write" : "Read",
+                      bound.node_layout->elements[linear].name,
+                      frame,
+                      returned);
     };
     if (writing) {
         const auto mask = std::uint32_t(n.writable_mask),
@@ -1168,7 +1127,7 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
             try {
                 fn->from_frame(before, frame);
             } catch (...) {
-                error("on_write");
+                log_error("on_write", n.name, frame);
             }
         return RegMmioReadResult{0};
     }
@@ -1178,7 +1137,7 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
         try {
             returned = fn->from_frame(returned, frame) & 0xffffffff;
         } catch (...) {
-            error("on_read");
+            log_error("on_read", n.name, frame);
             returned = REG_READ_CALLBACK_ERROR_MAGIC & 0xffffffff;
             source_ok = false;
         }
@@ -1188,7 +1147,7 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
             try {
                 fn->from_frame(returned, frame);
             } catch (...) {
-                error("on_read_complete");
+                log_error("on_read_complete", n.name, frame);
             }
     return RegMmioReadResult{returned};
 }

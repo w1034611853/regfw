@@ -1009,6 +1009,14 @@ class RegisterMap {
     HLogLevel access_log_level(const Node&) const noexcept;
     void
     access_log(const Resolution& r, RegData value, std::string_view action = {}) const noexcept;
+    void log_frame(HLogLevel level,
+                   std::string_view phase,
+                   std::string_view name,
+                   const detail::ScalarAccessFrame& frame,
+                   RegData value) const noexcept;
+    void log_error(std::string_view phase,
+                   std::string_view name,
+                   const detail::ScalarAccessFrame& frame) const noexcept;
     void log_error(std::string_view phase,
                    std::string_view name,
                    const RegAccessInfo* info = nullptr) const noexcept;

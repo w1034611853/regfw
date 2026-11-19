@@ -60,7 +60,7 @@ f9dc65f0259039099894b920f68234fb7e23f24a9d1abf2c8fec352c317d5c3e  ./docs/Archite
 1834f6cd58f30371e88d08b3273e3d86e1109e109800ad970360ba2999fbd693  ./docs/LegacyStaticLayout.md
 1010f7d6062364eb5b6f1017ab7bfc565456a82ff5f4882ff7c915b2db719765  ./docs/Migration.md
 5a42421d130073c609ef82bcc030a86ee515c6a1c3c89b0a233ff5767e874540  ./docs/Performance-Dispatch.md
-34c5a084f8991076b2abf1b95b5051ee6109dc6349985e6a3d3edcd1416ec5f9  ./docs/Performance-Fixed-Lifetime.md
+51ab53103f55129b50cb9dd14a90e70ecea34b9d7ce3b50b40dc127c053d2f06  ./docs/Performance-Fixed-Lifetime.md
 26e142a4af28e2b5d1268512ca07ec7943e1579e00a32cba06c72f43b9abbcb1  ./docs/Performance-Handles.md
 dcd66475f538275ac4d23cec9b33cb785881a8765fa0b26c5ae66ef191aa68e5  ./docs/Performance-Hooks.md
 20566ba080865c04f4bad4c18ee8bcfe9725ed210e7576b6622250f6af4e3949  ./docs/Performance-MMIO-Scalar.md
@@ -107,7 +107,7 @@ e9e44ea898555b84ee78fae851865a7c6842606043365fa93792c58afc272ddf  ./include/regf
 90ea6a7df6067d8b2fa27a8f7f84fff5699c970fee8e9439638712630c97ada3  ./include/regfw/layout_titles.hpp
 a80044b973ffe877e1d40dc80a6cb3be9e336ee7882db90e13f8c98c9a1055d3  ./include/regfw/qemu_bridge.h
 ffe136a31e661ab38dbf45e4d363f271935d6450190220f605f93f8eb1dc0f78  ./include/regfw/regfw.hpp
-cbddae93f12a718bf8bf1b2986d0cf2e7ab88b886e902f934eef62f8a8763920  ./include/regfw/runtime.hpp
+7f4bb2465837637dd2e1d6f4a1b7af8927ca21edd49958af5d061bc1dc83f55c  ./include/regfw/runtime.hpp
 6f28ee6c4037da2372739be202a56748b6a904c4a6671e4fd6f14e44788109ac  ./include/regfw/static_layout.hpp
 a009ba26e566e58a36b285e6bbfc391e04edc7482d24dbbce9968f00f27caa56  ./include/regfw/storage.hpp
 ce8d092c0de4e1902a72bdccb6d3e147a6581871d6cc860dcf449f6646e24d97  ./include/regfw/types.hpp
@@ -123,7 +123,7 @@ ef5ab5ac7430841dbc76f0d80dbaec9d22f2e0402ff08d410cd758e72ba6007c  ./src/README.m
 fd08fefe0c5e91af49e53a127a5273852239016dfaf60649fd8247ff51beeee6  ./src/diagnostics/errors.cpp
 83537c62008dcc893750f8cb5a455a7dc0fc3730316e5e4826be9db621512560  ./src/diagnostics/inspection.cpp
 3757277d11b82a35f3678be89c1f4fcabb2d1697db18aede281deba6b4af2a63  ./src/diagnostics/layout_report.cpp
-e863be0d0791a2d96bc8073064aa879e5fa0d61e1bb269f4db15669b99b39390  ./src/diagnostics/logging.cpp
+8ce1d7496040960c4186ac8e30d3da8ff5bed89a312a45fa8fc4c0870d0dcbbf  ./src/diagnostics/logging.cpp
 b53ab9c42559735ad72ca2a25c82891dc07fc5055d7a5cbb24023ce7a54d5323  ./src/dsl/declarations.cpp
 ef62df703036ca18062acc0759b92da3bb5246245857540fced7e88b3fffde72  ./src/internal/access_context.hpp
 267fe8a00233b5d9a16e5c7e8886aed3d039ab938815df55e9c829bb479b7271  ./src/internal/entity_state.hpp
@@ -133,7 +133,7 @@ bec39e4aa80e51ee0738617e174ff7c8b4e1547ea46e1d90cb7d4429b49d27f8  ./src/internal
 0e296daef1826e1b997ec764497e59dd64da1d134a30a08d9751d90820adefa4  ./src/layout/address_view.cpp
 77278f66e96e9860535564cbd7b800c7a9c56e26caa0e532a604f8459654113b  ./src/layout/formula.cpp
 ea90a28d99de43cd9dcfa14000afebb4b75acfcf3edf6c6a4164b3575fa7c19a  ./src/layout/instantiate.cpp
-4d91810fc505510db314cad8b6c46e7b03638db9964bc3ef08b97fb8225b2008  ./src/runtime/access.cpp
+b4addfa132e30712c6ef85ce245bf61679990ace5e7876a6a3aa40e81fa54481  ./src/runtime/access.cpp
 e43635113259f1449ce643c236e41827c149c4c483226ea28ec388e2a5cbb7dd  ./src/runtime/behaviors.cpp
 939c8852a058691a031e54560b40f3a2c0a631a2cede1768464a28ab2f49428e  ./src/runtime/bindings.cpp
 5e8ef4e5f941058c84af225b4e2a9efe23c2a73f5e59d36d299c34dc8cf6704e  ./src/runtime/callbacks.cpp
@@ -166,7 +166,7 @@ a66ec7be9562a02cbaa518494723e96a5d4164734ecb3d06da4f35348edd7a41  ./tests/init_v
 53d8649578c93ac47c9d8ceab9169b6d228249e9f19dfceb2a5f2e2435e6d5eb  ./tests/layout_separate_impl.cpp
 cf11b26bf32e273980ebe72794a5afdceda19001a3456a3333a0ef4618299e6e  ./tests/layout_separate_other.cpp
 25ae70d0b844418645030d7fc6d49f56ae883fcd300e19e2f46e5735b938358b  ./tests/logging.cpp
-66da5b932a642dc6635610d47f40dc0f6dbd4121d42c63d92cd71e5f1dc01c72  ./tests/mapped_logging.cpp
+76a6ddc74c131974520e76f8e347382c6cd9fdd53ecc7a1dda487379e30de47d  ./tests/mapped_logging.cpp
 229d7a07840e2c791daadf0d8e87ab5fe4392b31c3807f9ff92fcb27f44421d5  ./tests/read_callbacks.cpp
 2d144dccc86463339e1f19192293aaca99c044e67b76af175f16917796ac7441  ./tests/resolver_lifetime.cpp
 7514982c03191c1bec08064bc9b037f1ea483f6bbbdba9d99991a600816421ee  ./tests/resolver_safety.cpp
