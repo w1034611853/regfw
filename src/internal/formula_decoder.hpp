@@ -7,6 +7,8 @@ namespace detail {
 // dense table or hash + an instance-bound context. No per-access caches.
 class FormulaDecoder {
   public:
+    enum class Path : std::uint8_t { Generic, Scalar, Mapped };
+    static constexpr std::size_t max_redirect_targets = 64;
     struct Scope {
         std::uint32_t parent = STATIC_NONE;
         std::uint64_t base{}, size{};
@@ -16,13 +18,12 @@ class FormulaDecoder {
         AliasAccessPolicy policy; // effective down the chain
         const ViewPreAccessChain* pre_access_chain{};
         std::uint32_t identity = STATIC_NONE; // index into families below
+        bool preserve_identity_view{};
         std::string_view name;
     };
     struct Mount {
         std::uint64_t base{}, end{};
         std::uint32_t binding{}, scope{}, array{};
-        bool scalar{};
-        std::uint8_t fast_mapped{}; // identity/single-index eligibility, precomputed at finalize()
     };
     struct Reserve {
         std::uint64_t base = 0, end = 0;
@@ -30,14 +31,11 @@ class FormulaDecoder {
     };
     // Node traits snapshotted at finalize(); the hot path must not chase the
     // node pointer just to select an execution path. Only immutable-after-
-    // finish fields live here. Callbacks, logger and borrow are checked live.
+    // finish fields live here. The storage and logger state remain live.
     struct Binding {
         EntityState* node{};
         std::uint64_t canonical_base{};
         std::uint32_t linear{};
-        std::uint32_t writable_mask{std::uint32_t(~std::uint32_t{0})};
-        std::size_t scalar_stride{};
-        std::byte* scalar_data{};
         std::uint8_t scalar32_directions{};
         bool has_derivations{}, single_index{}, single_metadata_only{};
     };
@@ -104,8 +102,7 @@ class FormulaDecoder {
         }
     };
     // Bound once per mount. These stable references account for hooks,
-    // per-instance storage, route, identity and access policy. A callback
-    // slot may be changed by the user, so we never freeze its function value.
+    // per-instance storage, route, identity and access policy.
     struct PreparedMountContext : ScalarAccessSite {
         const Mount* mount{};
         const Binding* binding{};
@@ -114,7 +111,10 @@ class FormulaDecoder {
         const ViewPreAccessChain* pre_access_chain{};
         std::uint32_t identity_index{STATIC_NONE};
         std::int32_t priority{};
-        std::uint8_t scalar_directions{};
+        Path read_path{}, write_path{};
+        // A fast identity mount lies entirely within one window instance.
+        std::uint32_t request_id{};
+        std::uint64_t mount_inner{};
         // The node owns live callback slots, transaction/snapshot state, and
         // storage. No function pointer or mutable state is snapshotted here.
     };
@@ -126,11 +126,22 @@ class FormulaDecoder {
         std::shared_ptr<const EntityHashLayout> layout;
         std::vector<const EntityView*> identity_targets;
     };
+
+  public:
     struct PreparedHit {
         const EntityView* view{};
         const PreparedMountContext* context{};
         const PreparedAccessInfo* access{};
+        PreparedHit redirected(std::uint32_t id) const {
+            const auto* target = view->identity_targets[id];
+            return {target, &target->prepared[access->ordinal], access};
+        }
+        std::uint64_t canonical(std::uint64_t bus_address) const {
+            return context->target + (bus_address - context->mount->base);
+        }
     };
+
+  private:
     std::vector<EntityView> entity_views_;
     std::size_t entity_layout_count_{}, entity_hash_bytes_{};
     bool same_array_shape(std::uint32_t a_id, std::uint32_t b_id) const {
@@ -185,7 +196,11 @@ class FormulaDecoder {
         for (std::uint32_t id = 0; id < mounts_.size(); ++id) {
             const auto& m = mounts_[id];
             auto group = m.scope;
-            while (scopes_[group].parent != STATIC_NONE && scope_words[group] < min_view_keys)
+            // A small VF still needs its own binding table so a redirected
+            // coordinate selects the matching instance without decoding again.
+            while (scopes_[group].parent != STATIC_NONE && scope_words[group] < min_view_keys &&
+                   (!scopes_[group].preserve_identity_view ||
+                    scopes_[scopes_[group].parent].identity == scopes_[group].identity))
                 group = scopes_[group].parent;
             auto [it, created] =
                 scopes_to_view.try_emplace(group, static_cast<std::uint32_t>(entity_views_.size()));
@@ -286,9 +301,7 @@ class FormulaDecoder {
                                           AccessRoute{scope.route, scope.instance.value_or(0)},
                                           scope.policy,
                                           scope.instance,
-                                          scope.instance,
                                           scope.name,
-                                          nullptr,
                                           binding.canonical_base != mount.base},
                                          &mount,
                                          &binding,
@@ -332,8 +345,8 @@ class FormulaDecoder {
                 }))
                 continue;
             const auto& window = owner_->identities_[identity];
-            if (window.mode != IdentityRemapMode::RedirectBank || window.count > 64 ||
-                !window.stride || view.base < window.base)
+            if (window.mode != IdentityRemapMode::RedirectBank ||
+                window.count > max_redirect_targets || !window.stride || view.base < window.base)
                 continue;
             const auto inner = (view.base - window.base) % window.stride;
             const auto span = view.end - view.base;
@@ -405,16 +418,8 @@ class FormulaDecoder {
         }
         return winner != nullptr;
     }
-    const Mount* find_entity_hash(std::uint64_t word,
-                                  std::uint32_t& linear,
-                                  std::uint32_t& byte) const noexcept {
-        PreparedHit hit{};
-        if (!lookup_prepared(word, hit))
-            return nullptr;
-        linear = hit.access->linear;
-        byte = hit.access->byte;
-        return hit.context->mount;
-    }
+
+  public:
     bool find_prepared(std::uint64_t word, PreparedHit& hit) const noexcept {
         if (!lookup_prepared(word, hit))
             return false;
@@ -430,113 +435,14 @@ class FormulaDecoder {
         return true;
     }
     // Formula geometry is immutable after installation; address lookup has no mutable caches.
-  public:
     FormulaDecoder() = default;
 
-  private:
-    // Decode an offset inside one mount. Dense tilings (occupied is always a
-    // power of two bytes) resolve with one shift/mask pair from the inlined
-    // mount traits, exactly matching formula_decode_offset's Dense/Scalar
-    // branches; every other shape defers to the shared array table. The
-    // caller guarantees offset < mount end - base, so the span guard inside
-    // formula_decode_offset is subsumed for dense shapes.
-    // Only used for installing redirects and verifying element continuity.
-    // Ordinary MMIO already has the full prepared access context.
-    const Mount*
-    find_mount(std::uint64_t word, std::uint32_t& linear, std::uint32_t& byte) const noexcept {
-        const Mount* found = find_entity_hash(word, linear, byte);
-        if (!found || reserves_.empty())
-            return found;
-        for (const auto& r : reserves_) {
-            if (word < r.base)
-                break;
-            if (word >= r.end)
-                continue;
-            if (compare(r.scope, found->scope) >= 0)
-                return nullptr;
-        }
-        return found;
-    }
-
-  public:
-    // Fill the alias context from an already-located mount. Every field is
-    // written explicitly — no whole-entry reset on the hot path. The scratch
-    // entries keep their target_entry optionals permanently engaged, so this
-    // assigns through them without optional churn. Fields only consumed by
-    // rare paths (identity trio, redirect, name) get their neutral values.
-    void fill_entry(const Mount& mount,
-                    std::uint64_t word,
-                    RegisterMap::AliasEntry& out,
-                    std::uint32_t linear,
-                    std::uint32_t byte,
-                    const RegElementIndex* prepared_index = nullptr) const {
-        out.prepared_view = nullptr;
-        out.prepared_access = nullptr;
-        const auto& winner = &mount;
-        const auto& binding = bindings_[winner->binding];
-        const auto& scope = scopes_[winner->scope];
-        auto* const node = binding.node;
-        if (!out.target_entry)
-            out.target_entry.emplace(); // scratch slots stay engaged
-        out.compiled = true;
-        out.defined = true;
-        out.target = binding.canonical_base + (word - winner->base);
-        out.used = out.target != word;
-        out.available = arrays_[winner->array].occupied - byte;
-        // A bus access may only continue into the next word when the same
-        // element is selected there. Elements no wider than the current word
-        // can never continue, so the next-word probe is skipped entirely —
-        // min(available,4) is the identity when available<=4. Wider elements
-        // (overlays, reserves, cross-element boundaries) still probe.
-        if (out.available > 4) {
-            std::uint32_t next_linear = 0, next_byte = 0;
-            const auto* next = find_mount(word + 4, next_linear, next_byte);
-            if (next != &mount || next_linear != linear || next_byte != byte + 4)
-                out.available = 4;
-        }
-        out.route = {scope.route, scope.instance.value_or(0)};
-        out.policy = scope.policy;
-        out.instance = scope.instance;
-        out.view_name = scope.name;
-        out.pre_access_chain = scope.pre_access_chain;
-        out.priority = scope.outer_priority;
-        out.redirect_targets = nullptr;
-        out.identity_index.reset();
-        out.name = {};
-        if (scope.identity != STATIC_NONE) {
-            const auto index = identity_base_ + scope.identity;
-            out.identity_index = index;
-            const auto& window = owner_->identities_[index];
-            const auto offset = word - window.base;
-            const auto stride = window.stride;
-            const auto request = offset / stride;
-            const auto inner = offset % stride;
-            out.identity_request = static_cast<std::uint32_t>(request);
-            out.identity_inner = inner;
-            out.execute = &RegisterMap::resolve_plan<2>;
-        } else
-            out.execute = &RegisterMap::resolve_plan<1>;
-        auto& entry = *out.target_entry;
-        entry.node = node;
-        entry.linear = binding.linear + linear;
-        entry.byte_offset = byte;
-        entry.source_instance = scope.instance;
-        entry.view = &node->layout();
-        entry.precomputed_index = prepared_index;
-        out.callback_index = prepared_index
-                                 ? prepared_index
-                                 : &node->layout().elements[binding.linear + linear].index;
-        out.callback_instance = scope.instance;
-        out.scalar32_directions = 0;
-    }
     // One prepared Hash hit supplies the REG address, all coordinates, and a
     // per-View binding context. Construct only the *per-request* AliasEntry;
     // policy, pre-access, route, instance and callback-slot ownership were
     // already bound when the View was installed.
     void
     fill_prepared(const PreparedHit& hit, std::uint64_t word, RegisterMap::AliasEntry& out) const {
-        out.prepared_view = hit.view;
-        out.prepared_access = hit.access;
         const auto& info = *hit.access;
         const auto& bound = *hit.context;
         const auto& mount = *bound.mount;
@@ -549,9 +455,9 @@ class FormulaDecoder {
         if (out.available > 4) {
             // View overlap/reserve can interrupt an otherwise continuous
             // wide register. Validate only this rare, multi-word case.
-            std::uint32_t next_linear = 0, next_byte = 0;
-            const auto* next = find_mount(word + 4, next_linear, next_byte);
-            if (next != &mount || next_linear != info.linear || next_byte != info.byte + 4)
+            PreparedHit next{};
+            if (!find_prepared(word + 4, next) || next.context->mount != &mount ||
+                next.access->linear != info.linear || next.access->byte != info.byte + 4)
                 out.available = 4;
         }
         out.route = bound.route;
@@ -560,22 +466,11 @@ class FormulaDecoder {
         out.view_name = bound.view_name;
         out.pre_access_chain = bound.pre_access_chain;
         out.priority = bound.priority;
-        out.redirect_targets = nullptr;
-        out.identity_index.reset();
         out.name = {};
-        if (bound.identity_index != STATIC_NONE) {
-            const auto index = bound.identity_index;
-            out.identity_index = index;
-            const auto& window = owner_->identities_[index];
-            const auto offset = word - window.base;
-            const auto stride = window.stride;
-            const auto request = offset / stride;
-            const auto inner = offset % stride;
-            out.identity_request = static_cast<std::uint32_t>(request);
-            out.identity_inner = inner;
-            out.execute = &RegisterMap::resolve_plan<2>;
-        } else
-            out.execute = &RegisterMap::resolve_plan<1>;
+        if (bound.identity_index != STATIC_NONE)
+            out.identity_index = bound.identity_index;
+        else
+            out.identity_index.reset();
         if (!out.target_entry)
             out.target_entry.emplace();
         auto& entry = *out.target_entry;
@@ -585,9 +480,6 @@ class FormulaDecoder {
         entry.source_instance = bound.instance;
         entry.view = bound.node_layout;
         entry.precomputed_index = &info.index;
-        out.callback_index = &info.index;
-        out.callback_instance = bound.instance;
-        out.scalar32_directions = 0;
     }
     // Dynamic (AddressSpace/RegView) layouts use the same decoder as compiled
     // static layouts. The compiler emits one pattern mount per mapped REG
@@ -614,63 +506,68 @@ class FormulaDecoder {
         prepare_identity_targets();
         for (auto& b : bindings_) {
             const auto& n = *b.node;
-            b.writable_mask = static_cast<std::uint32_t>(n.writable_mask);
-            b.scalar_stride = n.scalar_stride;
-            b.scalar_data = n.scalar_data;
             b.scalar32_directions = n.scalar32_directions;
             b.has_derivations = !n.derivations.empty();
             b.single_index = bool(n.single_index);
             b.single_metadata_only = b.single_index && n.single_index->metadata_only;
         }
-        auto eligible = [](const RegisterMap::AliasEntry* target) -> std::uint8_t {
-            if (!target || !target->defined || !target->target_entry)
-                return 3;
-            const auto& e = *target->target_entry;
-            const auto& t = *e.node;
-            if (target->available < 4 || e.byte_offset ||
-                (!t.derivations.empty() && (!t.single_index || t.single_index->metadata_only)))
+        // A resolver may select any VF on any beat. Intersect fast directions for
+        // every possible winner, including behavior, width and split policy.
+        // Overlapping views, reserves and heterogeneous layouts keep full decode.
+        auto eligible = [&](const PreparedMountContext& target) -> unsigned {
+            const auto& b = *target.binding;
+            if (arrays_[target.mount->array].occupied != 4 ||
+                (b.has_derivations && (!b.single_index || b.single_metadata_only)))
                 return 0;
-            return t.scalar32_directions;
+            return b.scalar32_directions;
         };
-        RegisterMap::AliasEntry source{}, target{};
-        for (auto& mount : mounts_) {
-            mount.fast_mapped = 0;
-            const auto& scope = scopes_[mount.scope];
-            std::uint32_t linear = 0, byte = 0;
-            std::uint64_t word = mount.base;
-            if (scope.identity != STATIC_NONE) {
-                const auto& window = owner_->identities_[identity_base_ + scope.identity];
-                if (window.mode != IdentityRemapMode::RedirectBank || window.count > 64 ||
-                    mount.base < window.base || window.stride == 0)
-                    continue;
-                word = window.base + (mount.base - window.base) % window.stride;
-            }
-            const Mount* src = find_mount(word, linear, byte);
-            if (!src)
-                continue;
-            fill_entry(*src, word, source, linear, byte);
-            if (source.identity_index) {
-                const auto& window = owner_->identities_[*source.identity_index];
-                std::uint32_t tl = 0, tb = 0;
-                if (const Mount* dst = find_mount(window.base + source.identity_inner, tl, tb)) {
-                    fill_entry(*dst, window.base + source.identity_inner, target, tl, tb);
-                    mount.fast_mapped = eligible(&target);
+        for (auto& view : entity_views_) {
+            for (std::size_t ordinal = 0; ordinal < view.prepared.size(); ++ordinal) {
+                auto& context = view.prepared[ordinal];
+                const auto& b = *context.binding;
+                auto scalar = eligible(context);
+                unsigned mapped = 0;
+                if (context.identity_index != STATIC_NONE) {
+                    scalar = 0;
+                    const auto& window = owner_->identities_[context.identity_index];
+                    if (view.identity_targets.size() == window.count &&
+                        !view.identity_targets.empty()) {
+                        const auto& mount = *context.mount;
+                        const auto offset = mount.base - window.base;
+                        const auto inner = offset % window.stride;
+                        const auto span = mount.end - mount.base;
+                        if (inner >= window.region_offset && span <= window.region_size &&
+                            inner - window.region_offset <= window.region_size - span) {
+                            context.request_id = static_cast<std::uint32_t>(offset / window.stride);
+                            context.mount_inner = inner;
+                            mapped = 3;
+                            for (const auto* dst : view.identity_targets) {
+                                if (!dst) {
+                                    mapped = 0;
+                                    break;
+                                }
+                                mapped &= eligible(dst->prepared[ordinal]);
+                            }
+                        }
+                    }
+                } else if (b.has_derivations) {
+                    mapped = scalar;
+                    scalar = 0;
                 }
-            } else {
-                if (bindings_[mount.binding].single_index)
-                    mount.fast_mapped = eligible(&source);
+                const auto policy =
+                    (context.policy.allow_read ? 1 : 0) | (context.policy.allow_write ? 2 : 0);
+                scalar &= policy;
+                const auto scalar_path =
+                    owner_->pre_access_ || context.pre_access_chain ? Path::Mapped : Path::Scalar;
+                auto path = [&](unsigned direction) {
+                    if (scalar & direction)
+                        return scalar_path;
+                    return mapped & direction ? Path::Mapped : Path::Generic;
+                };
+                context.read_path = path(1);
+                context.write_path = path(2);
             }
         }
-        for (auto& view : entity_views_)
-            for (auto& context : view.prepared) {
-                const auto& b = *context.binding;
-                const auto policy = static_cast<std::uint8_t>((context.policy.allow_read ? 1 : 0) |
-                                                              (context.policy.allow_write ? 2 : 0));
-                context.scalar_directions =
-                    context.identity_index == STATIC_NONE && !b.has_derivations
-                        ? static_cast<std::uint8_t>(b.scalar32_directions & policy)
-                        : 0;
-            }
     }
     RegisterMap::AliasEntry* decode(std::uint64_t address, RegisterMap::AliasEntry& out) const {
         const auto word = address & ~std::uint64_t{3};
@@ -680,71 +577,6 @@ class FormulaDecoder {
         fill_prepared(hit, word, out);
         return &out;
     }
-    const RegisterMap::AliasEntry* redirect(const RegisterMap::AliasEntry& source,
-                                            std::uint32_t id,
-                                            std::uint64_t address,
-                                            RegisterMap::AliasEntry& out) const {
-        if (source.prepared_view && source.prepared_access) {
-            const auto& view = *static_cast<const EntityView*>(source.prepared_view);
-            if (id < view.identity_targets.size())
-                if (const auto* target = view.identity_targets[id]) {
-                    const auto* access =
-                        static_cast<const PreparedAccessInfo*>(source.prepared_access);
-                    fill_prepared(
-                        {target, &target->prepared[access->ordinal], access}, address, out);
-                    return &out;
-                }
-        }
-        return decode(address, out);
-    }
-    // Geometry and direction eligibility are prepared once per mount at
-    // finish. The hot path supplies only the element, live hooks/callbacks,
-    // and diagnostic context when it is actually needed.
-    const RegisterMap::CompiledAccess* fast_access(std::uint64_t address,
-                                                   RegisterMap::AccessScratch& scratch) const {
-        const auto word = address & ~std::uint64_t{3};
-        PreparedHit hit{};
-        if (!find_prepared(word, hit))
-            return nullptr;
-        const auto& context = *hit.context;
-        const auto& binding = *context.binding;
-        auto& n = *context.node;
-        auto& plan = scratch.decoded_access;
-        plan.metadata = nullptr;
-        plan.node = &n;
-        plan.mask = binding.writable_mask;
-        plan.directions = context.scalar_directions;
-        plan.mapped_directions = context.mount->fast_mapped;
-        plan.scalar = plan.directions ? binding.scalar_data +
-                                            (std::size_t(binding.linear) + hit.access->linear) *
-                                                binding.scalar_stride
-                                      : nullptr;
-        using Path = RegisterMap::CompiledAccess::Path;
-        // Reuse the mapped executor for hook-only scalar accesses. Hooks
-        // must not disable the single-index fast path or be frozen at finish.
-        const bool hooks = owner_->pre_access_ || context.pre_access_chain;
-        const auto scalar_path = hooks ? Path::Mapped : Path::Scalar;
-        plan.read_path = (plan.directions & 1)          ? scalar_path
-                         : (plan.mapped_directions & 1) ? Path::Mapped
-                                                        : Path::Generic;
-        plan.write_path = (plan.directions & 2)          ? scalar_path
-                          : (plan.mapped_directions & 2) ? Path::Mapped
-                                                         : Path::Generic;
-        // Scalar callbacks need a stable mount plus the selected coordinate,
-        // not a fully materialized AliasEntry. Full info is built by the
-        // callback adapter only when its signature/body consumes it.
-        if (plan.directions && !hooks) {
-            plan.scalar_site = &context;
-            plan.scalar_index = &hit.access->index;
-            plan.scalar_target = binding.canonical_base + (word - context.mount->base);
-            plan.linear = binding.linear + hit.access->linear;
-            return &plan;
-        }
-        auto& out = scratch.decoded[0];
-        fill_prepared(hit, word, out);
-        plan.metadata = &out;
-        return &plan;
-    }
     // Legacy scope ordering: deeper scopes win ties, higher priority wins at
     // the first divergent view level.
     int compare(std::uint32_t a, std::uint32_t b) const noexcept;
@@ -752,15 +584,6 @@ class FormulaDecoder {
     // winner context, in ascending address order.
     template <class F>
     void for_each_word(F f) const;
-    std::size_t mount_count() const noexcept {
-        return mounts_.size();
-    }
-    std::size_t zone_count() const noexcept {
-        return 0;
-    }
-    std::size_t binding_count() const noexcept {
-        return bindings_.size();
-    }
     friend class FormulaInstaller;
 };
 template <class F>

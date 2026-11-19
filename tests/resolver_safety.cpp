@@ -59,23 +59,32 @@ void index_binding() {
     CHECK(calls == 0);
     CHECK(bank.map().mmio_write(0, 17).success());
     CHECK(bank->VALUE.at(1).ref() == 17 && bank->VALUE.at(0).ref() == 0 && calls == 1);
-    bank.map().clear_access_resolver(Physical);
     configuration_error(
         [&] {
-            bank.finish();
+            bank.map().clear_access_resolver(Physical);
         },
-        "index:Physical");
-    CHECK(bank.map().try_mmio_read_sized(0, 4).result == reg::RegMemTxResult::DeviceError);
+        "frozen");
+    configuration_error(
+        [&] {
+            bank.map().set_access_resolver(Physical, [](const auto&) {
+                return 0u;
+            });
+        },
+        "frozen");
+    CHECK(bank.map().mmio_read(0) == 17);
 
     reg::RegisterBank<Indexed> late(reg::space(0x100).name("LATE"));
     late.map().defer_access_resolver(Physical);
-    late.finish();
-    CHECK(late.map().describe_layout(reg::LayoutDetail::Full).find("deferred") !=
-          std::string::npos);
+    configuration_error(
+        [&] {
+            late.finish();
+        },
+        "index:Physical");
     CHECK(late.map().mmio_write(0, 19).result == reg::RegMemTxResult::DeviceError);
     late.map().set_access_resolver(Physical, [](const auto& info) {
         return info.index_as(Logical);
     });
+    late.finish();
     CHECK(late.map().mmio_write(0, 19).success() && late->VALUE.at(0).ref() == 19);
 }
 void identity_failure() {
@@ -90,6 +99,7 @@ void identity_failure() {
         },
         "identity");
     unsigned calls = 0, events = 0;
+    unsigned mode = 0;
     first.on_write([&] {
         ++events;
     });
@@ -98,6 +108,12 @@ void identity_failure() {
     });
     map.set_identity_resolver([&](const auto& request) {
         ++calls;
+        if (mode == 1)
+            throw std::runtime_error("route table broken");
+        if (mode == 2)
+            return 2u;
+        if (mode == 3)
+            throw reg::Error("identity denied", reg::ErrorKind::Identity);
         return request.request_id;
     });
     map.finalize();
@@ -105,38 +121,29 @@ void identity_failure() {
     (void)map.describe_layout();
     CHECK(calls == 0);
     const auto before = map.dump_state_versioned();
-    map.set_identity_resolver([](const auto&) -> std::uint32_t {
-        throw std::runtime_error("route table broken");
-    });
+    mode = 1;
     CHECK(map.try_mmio_read_sized(0, 4).result == reg::RegMemTxResult::DeviceError);
     CHECK(map.mmio_write(0, 33).result == reg::RegMemTxResult::DeviceError);
     auto bridge = reg::make_qemu_bridge(map);
     std::uint64_t value{};
     CHECK(bridge.read(bridge.opaque, 0, &value, 4) != 0);
     CHECK(bridge.write(bridge.opaque, 0, 33, 4) != 0);
-    map.set_identity_resolver([](const auto&) {
-        return 2u;
-    });
+    mode = 2;
     CHECK(map.try_mmio_read_sized(0, 4).result == reg::RegMemTxResult::AccessError);
     CHECK(map.mmio_write(0, 33).result == reg::RegMemTxResult::AccessError);
     map.set_identity_rejection_policy(reg::IdentityRejectionPolicy::Ignore);
     const auto ignored = map.try_mmio_read_sized(0, 4);
     CHECK(ignored.result == reg::RegMemTxResult::Ignored && ignored.value == 0xdeadbeef);
     CHECK(map.mmio_write(0, 33).result == reg::RegMemTxResult::Ignored);
-    map.set_identity_resolver([](const auto&) -> std::uint32_t {
-        throw reg::Error("identity denied", reg::ErrorKind::Identity);
-    });
+    mode = 3;
     CHECK(map.mmio_write(0, 33).result == reg::RegMemTxResult::Ignored);
-    map.set_identity_resolver([](const auto&) -> std::uint32_t {
-        throw std::runtime_error("still broken");
-    });
+    mode = 1;
     CHECK(map.mmio_write(0, 33).result == reg::RegMemTxResult::DeviceError);
-    map.clear_identity_resolver();
     configuration_error(
         [&] {
-            map.finalize();
+            map.clear_identity_resolver();
         },
-        "identity");
+        "frozen");
     CHECK(map.try_mmio_read_sized(0, 4).result == reg::RegMemTxResult::DeviceError);
     CHECK(map.dump_state_versioned().data == before.data && events == 0);
 
@@ -146,11 +153,16 @@ void identity_failure() {
     late_layout.identity_repeat_window(
         {0, 1, 0x100, 0x100}, 7, reg::IdentityRemapMode::RedirectBank);
     late.defer_identity_resolver();
-    late.finalize();
+    configuration_error(
+        [&] {
+            late.finalize();
+        },
+        "identity");
     CHECK(late.mmio_write(0, 9).result == reg::RegMemTxResult::DeviceError);
     late.set_identity_resolver([](const auto& request) {
         return request.request_id;
     });
+    late.finalize();
     CHECK(late.mmio_write(0, 9).success() && reg.ref() == 9);
 }
 void failed_request_log() {

@@ -184,7 +184,7 @@ public:
     template<class... Ts>
     void operator()(Ts&&... fields) { (One(fields), ...); }
 
-private:
+    // Bulk payloads still share the enclosing archive's byte budget.
     void Bytes(const void* data, std::size_t size)
     {
         Account(size);
@@ -198,6 +198,7 @@ private:
         }
     }
 
+private:
     void Count(std::size_t count)
     {
         CheckCount(count);
@@ -320,7 +321,7 @@ public:
     template<class... Ts>
     void operator()(Ts&&... fields) { (One(fields), ...); }
 
-private:
+    // Bulk payloads still share the enclosing archive's byte budget.
     void Bytes(void* data, std::size_t size)
     {
         Account(size);
@@ -334,6 +335,7 @@ private:
         }
     }
 
+private:
     std::uint32_t Count()
     {
         std::uint32_t n = 0;

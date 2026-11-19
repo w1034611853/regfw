@@ -13,13 +13,16 @@
 struct File {
     std::vector<std::uint8_t> data;
     std::size_t pos{};
+    std::size_t writes{}, reads{};
 };
 extern "C" void module_var_save(void* opaque, const std::uint8_t* p, std::uint32_t n) {
     auto& f = *static_cast<File*>(opaque);
+    ++f.writes;
     f.data.insert(f.data.end(), p, p + n);
 }
 extern "C" void module_var_load(void* opaque, std::uint8_t* p, std::uint32_t n) {
     auto& f = *static_cast<File*>(opaque);
+    ++f.reads;
     if (n > f.data.size() - f.pos)
         throw std::runtime_error("short QEMU-style snapshot stream");
     std::memcpy(p, f.data.data() + f.pos, n);
@@ -378,17 +381,160 @@ void geometry_and_limits() {
     });
     CHECK(device.bank.save() == before);
 }
-void reject_reentrancy() {
+void reject_late_binding() {
     Device d;
-    bool rejected = false;
-    d.bank.map().set_pre_access([&](const auto&) {
-        try {
-            (void)d.bank.save();
-        } catch (const reg::Error&) {
-            rejected = true;
-        }
+    rejects([&] {
+        d.bank.map().set_pre_access([](const auto&) {});
     });
-    CHECK(d.bank.map().mmio_write(0, 1).success() && rejected);
+    CHECK(d.bank.map().mmio_write(0, 1).success());
+}
+// Older device archives have only operator(), with no bulk Bytes entry.
+template <class Archive>
+struct WordArchive {
+    static constexpr bool is_loading = Archive::is_loading;
+    Archive& archive;
+    template <class... T>
+    void operator()(T&&... values) {
+        archive(std::forward<T>(values)...);
+    }
+};
+void compact_validation_and_archive_compatibility() {
+    Device source, target;
+    source.bank.map().mmio_write(0, 0x12345678);
+    source.bank.map().mmio_read(0);
+    const auto checkpoint = source.bank.save();
+    const auto good = source.bank.map().dump_state_compact();
+    CHECK(good[2] == checkpoint.schema.layout_hash);
+    File bulk, fallback;
+    source.bank.save(&bulk);
+    hac::snapshot::Writer writer(&fallback);
+    WordArchive<hac::snapshot::Writer> old_writer{writer};
+    source.bank.save(old_writer);
+    CHECK(bulk.data == fallback.data && bulk.writes == 2 && fallback.writes == good.size() + 1);
+    hac::snapshot::Reader reader(&fallback);
+    WordArchive<hac::snapshot::Reader> old_reader{reader};
+    target.bank.load(old_reader);
+    CHECK(target.bank.save() == checkpoint && fallback.pos == fallback.data.size());
+    // The former rich bank stream is deliberately a different wire format.
+    File legacy;
+    auto versioned = checkpoint;
+    hac::snapshot::Writer legacy_writer(&legacy);
+    legacy_writer(versioned);
+    rejects([&] {
+        target.bank.load(&legacy);
+    });
+    CHECK(target.bank.save() == checkpoint);
+    legacy.pos = 0;
+    hac::snapshot::Reader legacy_reader(&legacy);
+    reg::VersionedSnapshot decoded;
+    legacy_reader(decoded);
+    target.bank.load(decoded);
+    CHECK(target.bank.save() == checkpoint && legacy.pos == legacy.data.size());
+    auto bad = [&](auto mutate) {
+        auto copy = good;
+        mutate(copy);
+        rejects([&] {
+            target.bank.map().restore_state_compact(copy);
+        });
+        CHECK(target.bank.save() == checkpoint);
+    };
+    bad([](auto& x) {
+        x[0] ^= 1;
+    });
+    bad([](auto& x) {
+        ++x[1];
+    });
+    bad([](auto& x) {
+        x[2] ^= 1;
+    });
+    bad([](auto& x) {
+        --x[3];
+    });
+    bad([](auto& x) {
+        ++x[4];
+    });
+    bad([](auto& x) {
+        ++x[5];
+    });
+    bad([](auto& x) {
+        x.pop_back();
+    });
+    // Transaction headers can follow an unaligned packed value region.
+    auto change_word = [](auto& words, std::size_t offset, std::uint64_t value) {
+        for (unsigned i = 0; i < 8; ++i) {
+            auto& word = words[(offset + i) / 8];
+            const auto shift = ((offset + i) % 8) * 8;
+            word = (word & ~(0xffull << shift)) | (((value >> (i * 8)) & 0xff) << shift);
+        }
+    };
+    bad([&](auto& x) {
+        change_word(x, 48 + x[4], UINT64_MAX);
+    });
+    bad([&](auto& x) {
+        change_word(x, 48 + x[4] + 8, UINT64_MAX);
+    });
+    bad([&](auto& x) {
+        change_word(x, 48 + x[4] + 16, 8);
+    });
+    File enormous;
+    enormous.data.assign(8, 0xff);
+    rejects([&] {
+        target.bank.load(&enormous);
+    });
+    CHECK(enormous.reads == 1 && target.bank.save() == checkpoint);
+    hac::snapshot::Limits limits;
+    limits.max_total_bytes = bulk.data.size() - 1;
+    File limited;
+    hac::snapshot::Writer limited_writer(&limited, limits);
+    rejects([&] {
+        source.bank.save(limited_writer);
+    });
+    CHECK(limited.writes == 1); // Bulk I/O cannot bypass the outer byte budget.
+}
+struct PackedValues : reg::RegEntityBundle {
+    REG_BUNDLE(PackedValues);
+    REG(TABLE, std::uint32_t, reg::at(0).array(reg::dims(256), reg::strides(4)));
+    REG(STATUS, std::uint32_t, reg::at(0x800).access(reg::ro));
+    REG(SMALL, std::uint8_t, reg::at(0x804));
+    REG(WIDE, reg::WideUInt<96>, reg::at(0x810));
+};
+struct NineInstances : reg::Bundle {
+    REG_BUNDLE(NineInstances);
+    REG_REPEAT_ENTITY(vf, PackedValues, 9);
+    REG_LAYOUT([](auto layout) {
+        auto view = layout.address_space("NINE").map_repeat(
+            "VF", 0, reg::repeat(9).stride(0x1000), [&](auto i) {
+                return layout.view("REGS", 0x1000).map(layout.vf[i]);
+            });
+        return view.map(layout.view("ALIAS", 0x1000).map(layout.vf[0]), 0x10000);
+    });
+};
+void packed_nine_instances() {
+    reg::RegisterBank<NineInstances> source(reg::space().finalize()),
+        target(reg::space().finalize());
+    for (unsigned v = 0; v < 9; ++v) {
+        for (unsigned i = 0; i < 256; ++i)
+            source->vf[v].TABLE.at(i).ref() = v * 1000 + i;
+        source->vf[v].STATUS.ref() = 0xaabb0000 + v;
+        source->vf[v].SMALL.ref() = v + 1;
+        source->vf[v].WIDE.ref().set_word(1, 0x12345678 + v);
+    }
+    constexpr std::size_t value_bytes = 9 * (256 * 4 + 4 + 1 + 12);
+    File file;
+    source.save(&file);
+    CHECK(file.data.size() == 8 + ((48 + value_bytes + 7) / 8) * 8 && file.writes == 2);
+    target.load(&file);
+    CHECK(file.pos == file.data.size() && file.reads == 2 && target.save() == source.save());
+    CHECK(target->vf[8].STATUS.ref() == 0xaabb0008);
+    CHECK(target.map().mmio_write(0x10000, 99).success() && target->vf[0].TABLE.at(0).ref() == 99);
+    auto padded = source.map().dump_state_compact();
+    CHECK(padded[3] % 8 != 0);
+    padded.back() |= 0xffull << 56;
+    const auto before = target.save();
+    rejects([&] {
+        target.map().restore_state_compact(padded);
+    });
+    CHECK(target.save() == before);
 }
 int main() try {
     duplex_and_stream();
@@ -396,7 +542,9 @@ int main() try {
     malformed_and_raw();
     field_recursion();
     geometry_and_limits();
-    reject_reentrancy();
+    reject_late_binding();
+    compact_validation_and_archive_compatibility();
+    packed_nine_instances();
     std::cout
         << "PASS: complete snapshots, two array elements, shared aliases, pending reads/writes, "
            "unified 64-bit transactions, high-to-low, failed-read flags, 96/2048-bit values, "

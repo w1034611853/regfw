@@ -251,7 +251,7 @@ class ViewCompiler {
         map_.lookup_.for_each([&](auto, const auto&) {
             legacy = true;
         });
-        if (legacy || map_.compiled_view_mode_)
+        if (legacy || map_.formula_)
             fail("AddressSpace requires a fresh storage-only entity layout");
         for (std::size_t id = 0; id < flat_.size(); ++id) {
             const auto& f = flat_[id];
@@ -387,6 +387,9 @@ class ViewCompiler {
             s.identity = identity_for[id]
                              ? static_cast<std::uint32_t>(*identity_for[id] - identity_base)
                              : STATIC_NONE;
+            s.preserve_identity_view =
+                s.identity != STATIC_NONE &&
+                identities[s.identity].window.count <= FormulaDecoder::max_redirect_targets;
             s.name = *names[id];
         }
         std::vector<FormulaDecoder::Mount> formula_mounts;
@@ -643,13 +646,8 @@ class ViewCompiler {
             const auto binding = binding_id(node,
                                             c0.addresses[f.elements[k].index],
                                             static_cast<std::uint32_t>(f.elements[k].index));
-            formula_mounts.push_back({first,
-                                      first + spec.span,
-                                      binding,
-                                      static_cast<std::uint32_t>(id),
-                                      array,
-                                      static_cast<bool>(node->value_size == 4 && node->scalar_data),
-                                      0});
+            formula_mounts.push_back(
+                {first, first + spec.span, binding, static_cast<std::uint32_t>(id), array});
         };
         for (std::size_t id = 0; id < flat_.size(); ++id) {
             const auto& f = flat_[id];
@@ -721,7 +719,6 @@ class ViewCompiler {
         map_.view_pre_access_chains_.swap(pre_chains);
         map_.mapping_warnings_ = std::move(warnings);
         map_.formula_ = std::move(decoder);
-        map_.compiled_view_mode_ = true;
     }
 
   public:
@@ -758,6 +755,7 @@ void RegisterMap::bind_window_resolver(const void* key,
                                        std::string_view name,
                                        std::shared_ptr<const IdentityFn> callback,
                                        detail::CallbackDescription description) {
+    mutable_bindings();
     require_initialized();
     auto& slot = access_resolvers_->identities[key];
     if (!slot) {
@@ -769,6 +767,7 @@ void RegisterMap::bind_window_resolver(const void* key,
     emit_resolver_update("identity:" + slot->name, slot->description, bool(slot->callback));
 }
 void RegisterMap::clear_window_resolver(const void* key) {
+    mutable_bindings();
     require_initialized();
     auto it = access_resolvers_->identities.find(key);
     if (it != access_resolvers_->identities.end()) {

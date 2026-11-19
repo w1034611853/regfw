@@ -100,7 +100,6 @@ struct EntityState {
     std::byte* scalar_data{};
     std::size_t scalar_stride{};
     RegData writable_mask{~RegData{}};
-    bool borrowed{};
     std::uint8_t scalar32_directions{};
     RegisterMap* owner{};
     RegEntity* entity{};
@@ -222,10 +221,6 @@ struct EntityState {
     RegData value_mask() const {
         return detail::low_mask(std::min(value_size * 8, 64u));
     }
-    void check_borrow() const {
-        if (borrowed)
-            throw Error("reentrant register access from a behavior: " + name);
-    }
     RegData apply_write(RegData current, RegData value, RegData mask) const {
         return custom_behavior ? behavior.write(current, value, mask)
                                : detail::apply_write(builtin, current, value, mask);
@@ -270,7 +265,6 @@ struct EntityState {
         return result;
     }
     void reset() {
-        check_borrow();
         for (std::size_t i = 0; i < element_count(); ++i) {
             if (is_wide())
                 write_wide(i, wide->wide_reset_value & wide_mask());
@@ -282,17 +276,6 @@ struct EntityState {
     }
 };
 RegisterMetadata node_metadata(const EntityState& node);
-struct NodeBorrow {
-    EntityState& node;
-    explicit NodeBorrow(EntityState& n) : node(n) {
-        n.check_borrow();
-        n.borrowed = true;
-    }
-    ~NodeBorrow() {
-        node.borrowed = false;
-    }
-    NodeBorrow(const NodeBorrow&) = delete;
-};
 template <class E>
 struct SparseLookup<E>::Page {
     std::array<std::uint32_t, 1024> ids;

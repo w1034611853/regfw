@@ -4,11 +4,10 @@
 #include <unordered_set>
 
 namespace reg {
-
 std::vector<RegisterMap::Node*> RegisterMap::snapshot_nodes() const {
     require_initialized();
     std::vector<Node*> out;
-    std::unordered_set<std::string> ids;
+    std::unordered_set<std::string_view> ids;
     std::unordered_set<std::uint32_t> orders;
     for (auto& p : nodes_)
         if (p->snapshot.kind == SnapshotKind::Migratable) {
@@ -73,7 +72,6 @@ std::size_t RegisterMap::dump_state(std::span<RegData> data) const {
         throw Error("snapshot buffer too small", ErrorKind::Snapshot);
     std::size_t at = 0;
     for (auto n : nodes) {
-        n->check_borrow();
         for (std::size_t i = 0; i < n->element_count(); ++i) {
             if (n->is_wide()) {
                 auto value = n->read_wide(i);
@@ -93,8 +91,6 @@ void RegisterMap::restore_state(std::span<const RegData> data) {
         count += n->snapshot_words();
     if (data.size() != count)
         throw Error("snapshot size mismatch", ErrorKind::Snapshot);
-    for (auto n : nodes)
-        n->check_borrow();
     std::size_t at = 0;
     std::vector<std::unique_ptr<detail::PreparedRestore>> staged;
     staged.reserve(nodes.size());

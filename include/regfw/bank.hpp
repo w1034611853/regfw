@@ -150,16 +150,30 @@ class RegisterBank {
         requires requires { Archive::is_loading; }
     void save(Archive& ar) const {
         static_assert(!Archive::is_loading, "save requires a writer archive");
-        auto snapshot = save();
-        ar(snapshot);
+        auto payload = state().map.dump_state_compact();
+        std::uint64_t words = payload.size();
+        ar(words);
+        if constexpr (requires { ar.Bytes(payload.data(), payload.size() * sizeof(RegData)); })
+            ar.Bytes(payload.data(), payload.size() * sizeof(RegData));
+        else
+            for (auto& word : payload)
+                ar(word);
     }
     template <class Archive>
         requires requires { Archive::is_loading; }
     void load(Archive& ar) {
         static_assert(Archive::is_loading, "load requires a reader archive");
-        VersionedSnapshot snapshot;
-        ar(snapshot);
-        load(snapshot);
+        std::uint64_t words{};
+        ar(words);
+        if (words < 6 || words > state().map.max_compact_snapshot_words())
+            throw Error("invalid compact register snapshot length", ErrorKind::Snapshot);
+        std::vector<RegData> payload(static_cast<std::size_t>(words));
+        if constexpr (requires { ar.Bytes(payload.data(), payload.size() * sizeof(RegData)); })
+            ar.Bytes(payload.data(), payload.size() * sizeof(RegData));
+        else
+            for (auto& word : payload)
+                ar(word);
+        state().map.restore_state_compact(payload);
     }
     // Enables VMSTATE_FIELDS(reg_bank, ...), without saving callbacks/pointers.
     template <class Archive>

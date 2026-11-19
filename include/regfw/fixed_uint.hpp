@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <array>
 #include <compare>
 #include <concepts>
@@ -282,13 +283,12 @@ class WideUInt {
     std::string hex(bool padded = false) const {
         constexpr char digits[] = "0123456789abcdef";
         std::string s;
-        for (unsigned n = (Bits + 3) / 4; n-- > 0;) {
-            unsigned d = 0;
-            for (unsigned j = 0; j < 4 && n * 4 + j < Bits; ++j)
-                if (bit(n * 4 + j))
-                    d |= 1u << j;
-            if (padded || !s.empty() || d || n == 0)
-                s += digits[d];
+        for (unsigned remaining = (Bits + 3) / 4; remaining != 0; --remaining) {
+            const unsigned shift = (remaining - 1) * 4;
+            const unsigned width = std::min(4u, Bits - shift);
+            const auto digit = (words_[shift / 64] >> (shift % 64)) & ((1u << width) - 1);
+            if (padded || !s.empty() || digit || remaining == 1)
+                s += digits[digit];
         }
         return s;
     }

@@ -4,7 +4,6 @@
 #include <unordered_set>
 
 namespace reg {
-
 // Address helpers and alias resolution.
 std::uint64_t RegisterMap::checked_map_size(std::uint64_t size) {
     if (!size || size % 4)
@@ -37,6 +36,12 @@ void RegisterMap::mutable_layout() const {
     require_initialized();
     if (finalized_)
         throw Error("register layout is finalized", ErrorKind::Configuration);
+}
+
+void RegisterMap::mutable_bindings() const {
+    require_initialized();
+    if (finalized_)
+        throw Error("callback/resolver bindings are frozen after finish", ErrorKind::Configuration);
 }
 
 void RegisterMap::region_check(std::uint64_t base, std::uint64_t n) const {
@@ -147,10 +152,25 @@ RegisterMap::AliasEntry RegisterMap::resolve_static(std::uint64_t address, unsig
     return walk_alias(address, size);
 }
 
-const RegisterMap::AliasEntry* RegisterMap::view_entry(std::uint64_t address,
-                                                       AliasEntry& scratch) const {
-    // The formula decoder is the only view dispatcher.
-    return formula_ ? formula_->decode(address, scratch) : nullptr;
+REGFW_DETAIL_ALWAYS_INLINE inline AccessIdentity
+RegisterMap::resolve_identity(const detail::IdentityWindow& window,
+                              const IdentityResolveRequest& request,
+                              std::source_location at) const {
+    const auto* fn = window.resolver ? window.resolver->callback.get() : identity_resolver_.get();
+    if (!fn)
+        throw Error("identity resolver is not configured", ErrorKind::Configuration, at);
+    std::uint32_t id;
+    try {
+        id = (*fn)(request);
+    } catch (const Error&) {
+        throw; // Keep any error category explicitly chosen by the device.
+    } catch (...) {
+        throw Error("identity resolver failed", ErrorKind::Device, at, std::current_exception());
+    }
+    if (id >= window.count)
+        throw Error("resolved identity out of range", ErrorKind::Identity, at);
+    return {
+        window.domain, request.request_id, id, window.mode, request.source, window.trace_labels};
 }
 
 RegisterMap::AddressResolution RegisterMap::resolve_metadata(std::uint64_t address, unsigned size) {
@@ -204,41 +224,24 @@ RegisterMap::AddressResolution RegisterMap::resolve_metadata(std::uint64_t addre
             }
     }
     if (hit) {
-        auto fn = (hit->resolver ? hit->resolver->callback : identity_resolver_);
-        if (!fn)
-            throw Error("identity resolver is not configured", ErrorKind::Configuration);
-        IdentityResolveRequest req{hit->domain,
-                                   match.first,
-                                   address,
-                                   alias.target,
-                                   match.second,
-                                   static_cast<std::uint8_t>(size),
-                                   alias.route,
-                                   source};
-        std::uint32_t id;
-        try {
-            id = (*fn)(req);
-        } catch (const Error&) {
-            throw; // An explicit device rejection keeps its error category.
-        } catch (...) {
-            throw Error("identity resolver failed",
-                        ErrorKind::Device,
-                        std::source_location::current(),
-                        std::current_exception());
-        }
-        if (id >= hit->count)
-            throw Error("resolved identity out of range", ErrorKind::Identity);
-        identity =
-            AccessIdentity{hit->domain, match.first, id, hit->mode, source, hit->trace_labels};
+        identity = resolve_identity(*hit,
+                                    {hit->domain,
+                                     match.first,
+                                     address,
+                                     alias.target,
+                                     match.second,
+                                     static_cast<std::uint8_t>(size),
+                                     alias.route,
+                                     source});
         if (hit->mode == IdentityRemapMode::RedirectBank) {
-            auto target =
-                resolve_static(hit->base + std::uint64_t(id) * hit->stride + match.second, size);
+            const auto bus =
+                hit->base + std::uint64_t(identity->resolved_id) * hit->stride + match.second;
+            auto target = resolve_static(bus, size);
             if (alias.route.is_direct())
                 alias.route = target.route;
             alias.policy = alias.policy.intersect(target.policy);
             if (!target.compiled)
-                alias.policy = alias.policy.intersect(
-                    view_policy(hit->base + std::uint64_t(id) * hit->stride + match.second, size));
+                alias.policy = alias.policy.intersect(view_policy(bus, size));
             if (!alias.instance)
                 alias.instance = hint ? hint : std::optional(match.first);
             alias.used |= target.used;
@@ -270,14 +273,12 @@ RegisterMap::Resolution& RegisterMap::resolve(std::uint64_t address,
         require_initialized();
         throw Error("address outside map", ErrorKind::Decode);
     }
-    if (compiled_view_mode_) {
+    if (formula_) {
         const auto* source = selected;
         if (!source)
-            source = view_entry(address, access_scratch_->decoded[0]);
+            source = formula_->decode(address, access_scratch_->decoded[0]);
         if (!source)
             throw Error("unmapped entity view address", ErrorKind::Decode);
-        if (source->execute)
-            return (this->*source->execute)(address, size, kind, value, source);
         if (source->identity_index)
             return resolve_plan<2>(address, size, kind, value, source);
         return resolve_plan<1>(address, size, kind, value, source);
@@ -317,42 +318,20 @@ RegisterMap::Resolution& RegisterMap::resolve_plan(std::uint64_t address,
         used = source->used;
         if constexpr (Mode == 2) {
             const auto& w = identities_.at(*source->identity_index);
-            const auto matched =
-                size == 4 && source->redirect_targets
-                    ? std::optional(std::pair{source->identity_request, source->identity_inner})
-                    : w.match(address, size, instance);
-            if (auto match = matched) {
-                auto fn = (w.resolver ? w.resolver->callback : identity_resolver_);
-                if (!fn)
-                    throw Error("identity resolver is not configured", ErrorKind::Configuration);
-                IdentityResolveRequest req{w.domain,
-                                           match->first,
-                                           address,
-                                           alias.target,
-                                           match->second,
-                                           static_cast<std::uint8_t>(size),
-                                           alias.route,
-                                           IdentityAddressSource::Bus};
-                std::uint32_t id;
-                try {
-                    id = (*fn)(req);
-                } catch (const Error&) {
-                    throw;
-                } catch (...) {
-                    throw Error("identity resolver failed",
-                                ErrorKind::Device,
-                                std::source_location::current(),
-                                std::current_exception());
-                }
-                if (id >= w.count)
-                    throw Error("resolved identity out of range", ErrorKind::Identity);
-                identity = AccessIdentity{
-                    w.domain, match->first, id, w.mode, IdentityAddressSource::Bus, w.trace_labels};
+            if (auto match = w.match(address, size, instance)) {
+                identity = resolve_identity(w,
+                                            {w.domain,
+                                             match->first,
+                                             address,
+                                             alias.target,
+                                             match->second,
+                                             static_cast<std::uint8_t>(size),
+                                             alias.route,
+                                             IdentityAddressSource::Bus});
                 if (w.mode == IdentityRemapMode::RedirectBank) {
-                    const auto address2 = w.base + std::uint64_t(id) * w.stride + match->second;
-                    target = source->redirect_targets
-                                 ? source->redirect_targets[id]
-                                 : view_entry(address2, access_scratch_->decoded[1]);
+                    const auto address2 =
+                        w.base + std::uint64_t(identity->resolved_id) * w.stride + match->second;
+                    target = formula_->decode(address2, access_scratch_->decoded[1]);
                     if (!target)
                         throw Error("unmapped entity view address", ErrorKind::Decode);
                     target_lane = address2 & 3;
@@ -394,7 +373,6 @@ RegisterMap::Resolution& RegisterMap::resolve_plan(std::uint64_t address,
         throw Error("unmapped register address", ErrorKind::Decode);
     auto e = *p;
     auto& n = *e.node;
-    n.check_borrow();
     if (size == 8) {
         auto hi = compiled ? nullptr : lookup_.get(alias.target + 4);
         if (alias.target % 8 || e.byte_offset + 8 > n.value_size ||
@@ -468,7 +446,7 @@ void RegisterMap::derive(Resolution& r) {
         i.mapped_fields.entries.activate();
         i.index_fields.entries[0] = {plan->source, plan->source_name, original, plan->dimension};
         i.index_fields.size = 1;
-        const auto value = (*plan->resolver)(i);
+        const auto value = (*plan->resolver)(i, original);
         i.mapped_fields.entries[0] = {plan->output,
                                       plan->output_name,
                                       value,
@@ -557,13 +535,10 @@ bool RegisterMap::pre(const Node& node,
     auto report = [&](std::string_view phase) {
         if constexpr (std::same_as<Context, RegAccessInfo>)
             log_error(phase, node.name, &context);
-        else if (log_enabled(HLOG_LEVEL_ERROR)) {
-            auto& info = access_scratch_->resolution.info;
-            context.fill(info);
-            log_error(phase, node.name, &info);
-        }
+        else
+            log_error(phase, node.name, context);
     };
-    PreAccessGuard guard(*this);
+
     if (fn)
         try {
             invoke(*fn);
@@ -587,24 +562,23 @@ bool RegisterMap::pre(const Node& node,
     return true;
 }
 
-bool RegisterMap::access_log_enabled(const Node& n) const noexcept {
+REGFW_DETAIL_ALWAYS_INLINE inline HLogLevel
+RegisterMap::access_log_level(const Node& n) const noexcept {
     if (!logger_ || n.log_policy == LogPolicy::Hidden)
-        return false;
-    return log_enabled(HLOG_LEVEL_TRACE) ||
-           (n.log_policy != LogPolicy::Trace && log_enabled(HLOG_LEVEL_DEBUG));
+        return HLOG_LEVEL_OFF;
+    if (log_enabled(HLOG_LEVEL_TRACE))
+        return HLOG_LEVEL_TRACE;
+    if (n.log_policy == LogPolicy::Normal && log_enabled(HLOG_LEVEL_DEBUG))
+        return HLOG_LEVEL_DEBUG;
+    return HLOG_LEVEL_OFF;
 }
 
 void RegisterMap::access_log(const Resolution& r,
                              RegData value,
                              std::string_view action) const noexcept {
-    if (!logger_)
+    const auto level = access_log_level(*r.entry.node);
+    if (level == HLOG_LEVEL_OFF)
         return;
-    const auto& n = *r.entry.node;
-    if (!access_log_enabled(n))
-        return;
-    auto level = log_enabled(HLOG_LEVEL_TRACE) ? HLOG_LEVEL_TRACE : HLOG_LEVEL_DEBUG;
-    if (n.log_policy == LogPolicy::Trace)
-        level = HLOG_LEVEL_TRACE;
     emit_log({level,
               r.info.is_read() ? "Read" : "Write",
               r.entry.view->elements[r.entry.linear].name,
@@ -615,24 +589,12 @@ void RegisterMap::access_log(const Resolution& r,
               r.identity ? &*r.identity : nullptr});
 }
 
-void RegisterMap::log_error(std::string_view phase,
-                            std::string_view name,
-                            const RegAccessInfo* info) const noexcept {
-    if (!log_enabled(HLOG_LEVEL_ERROR))
-        return;
-    try {
-        auto text = format_error_chain(std::current_exception());
-        emit_log({HLOG_LEVEL_ERROR, phase, name, info, 0, {}, text});
-    } catch (...) {
-    }
-}
-
 void RegisterMap::complete_read_event(Resolution& r, WideRegData value, bool source_ok) {
     if (!source_ok)
         return;
     auto& n = *r.entry.node;
     if (n.is_wide()) {
-        auto callback = n.wide->wide_read_complete_callback;
+        const auto* callback = n.wide->wide_read_complete_callback.get();
         if (callback)
             try {
                 (*callback)(value, r.info);
@@ -640,7 +602,7 @@ void RegisterMap::complete_read_event(Resolution& r, WideRegData value, bool sou
                 log_error("on_read_complete", n.name, &r.info);
             }
     } else {
-        auto callback = n.read_complete_callback;
+        const auto* callback = n.read_complete_callback.get();
         if (callback)
             try {
                 (*callback)(value.low_u64(), r.info);
@@ -675,10 +637,7 @@ RegMmioWriteResult RegisterMap::write_wide(Resolution& r) {
         return {RegMemTxResult::Ignored};
     auto old = n.read_wide(r.entry.linear), mask = values.bus_mask & n.wide->wide_writable_mask;
     WideRegData result;
-    {
-        detail::NodeBorrow borrow(n);
-        result = n.apply_wide_write(old, (old & ~values.bus_mask) | values.bus_data, mask);
-    }
+    result = n.apply_wide_write(old, (old & ~values.bus_mask) | values.bus_data, mask);
     auto after = ((old & ~mask) | (result & mask)) & n.wide_mask();
     n.write_wide(r.entry.linear, after);
     values.stored_before = old;
@@ -686,7 +645,7 @@ RegMmioWriteResult RegisterMap::write_wide(Resolution& r) {
     i.stored_before = old.low_u64();
     i.stored_after = after.low_u64();
     access_log(r, i.stored_after);
-    auto callback = n.wide->wide_write_callback;
+    const auto* callback = n.wide->wide_write_callback.get();
     if (callback)
         try {
             (*callback)(old, i);
@@ -709,17 +668,14 @@ RegMmioReadResult RegisterMap::read_wide(Resolution& r) {
         return {REG_READ_CALLBACK_ERROR_MAGIC & detail::low_mask(i.size * 8)};
     auto before = n.read_wide(r.entry.linear), after = before;
     WideRegData returned;
-    {
-        detail::NodeBorrow borrow(n);
-        returned = n.apply_wide_read(after, values.bus_mask) & n.wide_mask();
-    }
+    returned = n.apply_wide_read(after, values.bus_mask) & n.wide_mask();
     after &= n.wide_mask();
     n.write_wide(r.entry.linear, after);
     values.stored_before = before;
     values.stored_after = after;
     i.stored_before = before.low_u64();
     i.stored_after = after.low_u64();
-    auto callback = n.wide->wide_read_callback;
+    const auto* callback = n.wide->wide_read_callback.get();
     bool source_ok = true;
     if (callback)
         try {
@@ -792,7 +748,6 @@ RegMmioWriteResult RegisterMap::write_transaction(Resolution& r) {
         mask & (n.is_wide() ? n.wide->wide_writable_mask : WideRegData(n.writable_mask));
     WideRegData result;
     {
-        detail::NodeBorrow borrow(n);
         auto merged = (old & ~mask) | pending;
         if (n.is_wide())
             result = n.apply_wide_write(old, merged, effective);
@@ -811,7 +766,7 @@ RegMmioWriteResult RegisterMap::write_transaction(Resolution& r) {
     i.stored_after = after.low_u64();
     access_log(r, i.stored_after, "commit-write");
     if (n.is_wide()) {
-        auto callback = n.wide->wide_write_callback;
+        const auto* callback = n.wide->wide_write_callback.get();
         if (callback)
             try {
                 (*callback)(old, i);
@@ -819,7 +774,7 @@ RegMmioWriteResult RegisterMap::write_transaction(Resolution& r) {
                 log_error("on_write", n.name, &i);
             }
     } else {
-        auto callback = n.write_callback;
+        const auto* callback = n.write_callback.get();
         if (callback)
             try {
                 (*callback)(old.low_u64(), i);
@@ -871,7 +826,6 @@ RegMmioReadResult RegisterMap::read_transaction(Resolution& r) {
         auto before = read_storage(n, r.entry.linear), after = before;
         auto all = WideRegData::mask(n.value_size * 8);
         {
-            detail::NodeBorrow borrow(n);
             if (n.is_wide())
                 returned = n.apply_wide_read(after, all) & all;
             else {
@@ -888,7 +842,7 @@ RegMmioReadResult RegisterMap::read_transaction(Resolution& r) {
         i.stored_after = after.low_u64();
         bool failed = false;
         if (n.is_wide()) {
-            auto callback = n.wide->wide_read_callback;
+            const auto* callback = n.wide->wide_read_callback.get();
             if (callback)
                 try {
                     returned = (*callback)(returned, i) & all;
@@ -897,7 +851,7 @@ RegMmioReadResult RegisterMap::read_transaction(Resolution& r) {
                     failed = true;
                 }
         } else {
-            auto callback = n.read_callback;
+            const auto* callback = n.read_callback.get();
             if (callback)
                 try {
                     returned = WideRegData((*callback)(returned.low_u64(), i)) & all;
@@ -924,79 +878,47 @@ RegMmioReadResult RegisterMap::read_transaction(Resolution& r) {
 }
 
 // Scalar and mapped fast paths (preserve the same callback/transaction semantics).
-// Legacy direct maps already have a word-to-entity lookup. Reuse the scalar
-// executor instead of constructing an alias route and a complete Resolution.
-const RegisterMap::CompiledAccess* RegisterMap::direct_scalar(std::uint64_t address) {
-    const auto* entry = lookup_.get(address);
-    if (!entry || entry->byte_offset)
-        return nullptr;
-    auto& n = *entry->node;
-    if (!n.scalar32_directions || !n.derivations.empty())
-        return nullptr;
-    auto& plan = access_scratch_->decoded_access;
-    auto& site = access_scratch_->direct_site;
-    plan.metadata = nullptr;
-    plan.node = &n;
-    plan.scalar = n.scalar_data + std::size_t(entry->linear) * n.scalar_stride;
-    plan.mask = static_cast<std::uint32_t>(n.writable_mask);
-    plan.linear = entry->linear;
-    plan.scalar_site = &site;
-    plan.scalar_index = &entry->view->elements[entry->linear].index;
-    plan.scalar_target = address;
-    site.callback_instance = entry->source_instance;
-    using Path = CompiledAccess::Path;
-    plan.read_path = n.scalar32_directions & 1 ? Path::Scalar : Path::Generic;
-    plan.write_path = n.scalar32_directions & 2 ? Path::Scalar : Path::Generic;
-    return &plan;
-}
-
 template <bool Writing>
-std::optional<RegData>
-RegisterMap::fast_scalar(std::uint64_t address, RegData value, const CompiledAccess* selected) {
-    // Entry validation and immutable path selection were done by dispatch.
+REGFW_DETAIL_ALWAYS_INLINE inline std::optional<RegMmioReadResult>
+RegisterMap::fast_scalar(std::uint64_t address,
+                         RegData value,
+                         Node& n,
+                         std::uint32_t linear,
+                         const detail::ScalarAccessSite& site,
+                         const RegElementIndex& index,
+                         std::uint64_t target) {
     constexpr bool writing = Writing;
-    auto& n = *selected->node;
-    if (n.borrowed)
+    if (access_log_level(n) != HLOG_LEVEL_OFF)
         return {};
-    if (logger_ && n.log_policy != LogPolicy::Hidden &&
-        (log_enabled(HLOG_LEVEL_DEBUG) || log_enabled(HLOG_LEVEL_TRACE)))
-        return {};
-    auto* p = selected->scalar;
+    auto* p = n.scalar_data + std::size_t(linear) * n.scalar_stride;
     std::uint32_t stored;
     std::memcpy(&stored, p, 4);
-    auto mask = selected->mask;
+    auto mask = static_cast<std::uint32_t>(n.writable_mask);
     auto after = (stored & ~mask) | (std::uint32_t(value) & mask);
     if (writing && !n.write_callback) {
         std::memcpy(p, &after, 4);
-        return RegData{};
+        return RegMmioReadResult{};
     }
     if (!writing && !n.read_callback && !n.read_complete_callback)
-        return RegData(stored);
+        return RegMmioReadResult{stored};
 
-    detail::ScalarAccessFrame frame{selected->scalar_site,
+    detail::ScalarAccessFrame frame{&site,
                                     address,
                                     writing ? std::uint32_t(value) : 0,
                                     stored,
                                     writing ? after : stored,
                                     writing ? RegTransactionKind::Write : RegTransactionKind::Read,
                                     nullptr,
-                                    selected->scalar_index,
-                                    selected->scalar_target};
-    auto report = [&](std::string_view phase) {
-        if (log_enabled(HLOG_LEVEL_ERROR)) {
-            RegAccessInfo i;
-            frame.fill(i);
-            log_error(phase, n.name, &i);
-        }
-    };
+                                    &index,
+                                    target};
     if (writing) {
         std::memcpy(p, &after, 4);
         try {
             n.write_callback->from_frame(stored, frame);
         } catch (...) {
-            report("on_write");
+            log_error("on_write", n.name, frame);
         }
-        return RegData{};
+        return RegMmioReadResult{};
     }
     RegData returned = stored;
     bool source_ok = true;
@@ -1004,200 +926,196 @@ RegisterMap::fast_scalar(std::uint64_t address, RegData value, const CompiledAcc
         try {
             returned = fn->from_frame(returned, frame) & 0xffffffff;
         } catch (...) {
-            report("on_read");
+            log_error("on_read", n.name, frame);
             returned = REG_READ_CALLBACK_ERROR_MAGIC & 0xffffffff;
             source_ok = false;
         }
-    if (logger_ && n.log_policy != LogPolicy::Hidden) {
-        auto level = log_enabled(HLOG_LEVEL_TRACE) ? HLOG_LEVEL_TRACE : HLOG_LEVEL_DEBUG;
-        if (n.log_policy == LogPolicy::Trace)
-            level = HLOG_LEVEL_TRACE;
-        if (log_enabled(level)) {
-            RegAccessInfo i;
-            frame.fill(i);
-            emit_log(
-                {level, "Read", n.layout().elements[selected->linear].name, &i, returned, {}, {}});
-        }
-    }
+    if (const auto level = access_log_level(n); level != HLOG_LEVEL_OFF)
+        log_frame(level, "Read", n.layout().elements[linear].name, frame, returned);
     if (source_ok)
         if (auto* fn = n.read_complete_callback.get())
             try {
                 fn->from_frame(returned, frame);
             } catch (...) {
-                report("on_read_complete");
+                log_error("on_read_complete", n.name, frame);
             }
-    return returned;
+    return RegMmioReadResult{returned};
 }
 
-template <bool Writing>
-std::optional<RegMmioReadResult>
-RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const CompiledAccess* selected) {
+template <bool Writing, class Selection>
+RegMmioReadResult
+RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection& source) {
     constexpr bool writing = Writing;
-    const auto* source = selected->metadata;
-    const auto* target = source;
-    auto route = source->route;
-    auto policy = source->policy;
-    auto instance = source->instance;
-    bool used = source->used;
+    const auto& origin = *source.context;
+    const auto source_address = source.canonical(address);
+    auto target = source;
+    auto target_address = source_address;
+    auto route = origin.route;
+    auto policy = origin.policy;
+    auto instance = origin.instance;
+    bool used = origin.used;
     std::optional<AccessIdentity> identity;
-    if (source->identity_index) {
-        const auto& w = identities_[*source->identity_index];
-        auto fn = (w.resolver ? w.resolver->callback : identity_resolver_);
-        if (!fn)
-            throw Error("identity resolver is not configured", ErrorKind::Configuration);
-        IdentityResolveRequest req{w.domain,
-                                   source->identity_request,
-                                   address,
-                                   source->target,
-                                   source->identity_inner,
-                                   4,
-                                   route,
-                                   IdentityAddressSource::Bus};
-        std::uint32_t id;
-        try {
-            id = (*fn)(req);
-        } catch (const Error&) {
-            throw;
-        } catch (...) {
-            throw Error("identity resolver failed",
-                        ErrorKind::Device,
-                        std::source_location::current(),
-                        std::current_exception());
-        }
-        if (id >= w.count)
-            throw Error("resolved identity out of range", ErrorKind::Identity);
-        identity = AccessIdentity{
-            w.domain, req.request_id, id, w.mode, IdentityAddressSource::Bus, w.trace_labels};
+    if (origin.identity_index != detail::STATIC_NONE) {
+        const auto& w = identities_[origin.identity_index];
+        const auto request = origin.request_id;
+        const auto inner = origin.mount_inner + (address - origin.mount->base);
+        identity = resolve_identity(w,
+                                    {w.domain,
+                                     request,
+                                     address,
+                                     source_address,
+                                     inner,
+                                     4,
+                                     route,
+                                     IdentityAddressSource::Bus});
         if (w.mode == IdentityRemapMode::RedirectBank) {
-            target = source->redirect_targets
-                         ? source->redirect_targets[id]
-                         : formula_->redirect(*source,
-                                              id,
-                                              w.base + std::uint64_t(id) * w.stride +
-                                                  source->identity_inner,
-                                              access_scratch_->decoded[1]);
-            if (!target || !target->defined || !target->target_entry)
-                throw Error("unmapped entity view address", ErrorKind::Decode);
+            const auto id = identity->resolved_id;
+            const auto bus = w.base + std::uint64_t(id) * w.stride + inner;
+            target = source.redirected(id);
+            target_address = target.canonical(bus);
             if (route.is_direct())
-                route = target->route;
-            policy = policy.intersect(target->policy);
+                route = target.context->route;
+            policy = policy.intersect(target.context->policy);
             if (!instance)
-                instance = req.request_id;
-            used |= target->used;
+                instance = request;
+            used |= target.context->used;
         }
     }
-    auto entry = *target->target_entry;
-    auto& n = *entry.node;
-    n.check_borrow();
-    // Identity resolution has already selected the storage. If no following
-    // operation consumes access info, avoid constructing any callback context.
-    if (!n.single_index && !pre_access_ && !target->pre_access_chain && !logger_ &&
-        (writing ? policy.allow_write && !n.write_callback
-                 : policy.allow_read && !n.read_callback && !n.read_complete_callback)) {
-        auto* data = n.scalar_data + std::size_t(entry.linear) * n.scalar_stride;
-        std::uint32_t stored;
-        std::memcpy(&stored, data, 4);
+    const auto& bound = *target.context;
+    const auto& coordinate = target.access->index;
+    auto linear = bound.binding->linear + target.access->linear;
+    auto& n = *bound.node;
+    auto data_at = [&](std::uint32_t index) {
+        return n.scalar_data + std::size_t(index) * n.scalar_stride;
+    };
+    auto word_at = [&](std::uint32_t index) {
+        std::uint32_t word;
+        std::memcpy(&word, data_at(index), sizeof(word));
+        return word;
+    };
+    const auto* plan = n.single_index.get();
+    const auto* resolver = plan ? plan->resolver->callback.get() : nullptr;
+    const auto logical = plan ? coordinate.values[plan->dimension] : 0;
+    const bool allowed = writing ? policy.allow_write : policy.allow_read;
+    const bool hooks = pre_access_ || bound.pre_access_chain;
+    const bool callbacks =
+        writing ? bool(n.write_callback) : n.read_callback || n.read_complete_callback;
+    const bool unobserved = !hooks && !callbacks;
+    const auto plain = [&](std::uint32_t index, std::uint32_t before) {
         if constexpr (Writing) {
             const auto mask = std::uint32_t(n.writable_mask);
-            const auto after = (stored & ~mask) | (std::uint32_t(value) & mask);
-            std::memcpy(data, &after, 4);
+            const auto after = (before & ~mask) | (std::uint32_t(value) & mask);
+            std::memcpy(data_at(index), &after, sizeof(after));
             return RegMmioReadResult{0};
         } else {
-            return RegMmioReadResult{stored};
+            return RegMmioReadResult{before};
         }
-    }
+    };
+    const auto logical_before = word_at(linear);
+    if (!plan && allowed && unobserved && access_log_level(n) == HLOG_LEVEL_OFF)
+        return plain(linear, logical_before);
+
     detail::MappedAccessFrame mapped;
-    mapped.source = source;
-    mapped.target = target;
-    mapped.identity = identity ? &*identity : nullptr;
-    mapped.request = target->callback_index;
-    mapped.linear = entry.linear;
-    mapped.route = route;
-    mapped.policy = policy;
-    mapped.instance = instance ? instance : entry.source_instance;
-    mapped.used = used;
-    mapped.index_scratch = &access_scratch_->index;
-    mapped.mapped_scratch = &access_scratch_->mapped;
-    detail::ScalarAccessFrame frame{target,
+    detail::ScalarAccessFrame frame{&bound,
                                     address,
                                     writing ? std::uint32_t(value) : 0,
-                                    n.read_scalar(entry.linear),
-                                    0,
+                                    logical_before,
+                                    logical_before,
                                     writing ? RegTransactionKind::Write : RegTransactionKind::Read,
                                     &mapped};
-    frame.after = frame.before;
-    auto resolution = [&]() -> Resolution& {
-        auto& r = access_scratch_->resolution;
-        r.entry = entry;
-        r.identity = identity;
-        r.alias = {target->target, route, policy, target->pre_access_chain};
-        frame.fill(r.info);
-        return r;
+    // A rich resolver, register hook or denied access always needs this
+    // frame. Only the unobserved coordinate-only case defers assembly.
+    const bool deferred = unobserved && allowed && resolver && resolver->coordinates;
+    auto populate = [&] {
+        mapped.source_address = source_address;
+        mapped.target_address = target_address;
+        mapped.view_name = bound.view_name;
+        mapped.identity = identity ? &*identity : nullptr;
+        mapped.request = &coordinate;
+        mapped.linear = linear;
+        mapped.route = route;
+        mapped.policy = policy;
+        mapped.instance = instance ? instance : bound.instance;
+        mapped.used = used;
+        mapped.index_scratch = &access_scratch_->index;
+        mapped.mapped_scratch = &access_scratch_->mapped;
+        if (allowed && plan) {
+            mapped.mapping = plan;
+            mapped.group = n.derivations.front().name;
+            mapped.logical = logical;
+        }
     };
+    if (!deferred)
+        populate();
     const auto invalid = INVALID_READ_VALUE & 0xffffffff;
-    if (writing ? !policy.allow_write : !policy.allow_read) {
-        auto& r = resolution();
-        emit_log({HLOG_LEVEL_WARN,
-                  writing ? "alias write denied" : "alias read denied",
-                  n.name,
-                  &r.info,
-                  writing ? value : 0,
-                  {},
-                  {},
-                  nullptr});
+    if (!allowed) {
+        if (log_enabled(HLOG_LEVEL_WARN))
+            log_frame(HLOG_LEVEL_WARN,
+                      writing ? "alias write denied" : "alias read denied",
+                      n.name,
+                      frame,
+                      writing ? value : 0);
         const auto action = writing ? policy.denied_write : policy.denied_read;
         return RegMmioReadResult{writing ? 0 : invalid,
                                  action == DeniedAccessAction::Ignore
                                      ? RegMemTxResult::Ignored
                                      : RegMemTxResult::AccessError};
     }
-    if (const auto* plan = n.single_index.get()) {
-        mapped.mapping = plan;
-        mapped.group = n.derivations.front().name;
-        mapped.logical = mapped.request->values[plan->dimension];
+    if (plan) {
+        auto failed = [&](RegMemTxResult result) {
+            if (log_enabled(HLOG_LEVEL_ERROR)) {
+                if (deferred)
+                    populate();
+                log_error("access mapping/validation", n.name, frame);
+            }
+            return RegMmioReadResult{writing ? 0 : invalid, result};
+        };
         try {
-            mapped.mapped = plan->resolver->from_frame(frame);
+            if (!resolver)
+                throw RegAccessDeriveError::device_error("access resolver is not bound: " +
+                                                         plan->resolver->name);
+            if (resolver->coordinates) {
+                const auto id = identity ? identity->resolved_id
+                                         : instance.value_or(bound.instance.value_or(0));
+                mapped.mapped = resolver->coordinates(id, logical);
+            } else {
+                mapped.mapped = resolver->frame(frame);
+            }
             mapped.has_mapped = true;
             if (mapped.mapped >= plan->extent)
                 throw RegAccessDeriveError::access_error("mapped element out of range");
             mapped.index_valid = true;
-            const auto old = mapped.request->values[plan->dimension];
-            if (mapped.mapped != old) {
-                entry.linear = entry.linear - old * plan->coefficient +
-                               static_cast<std::uint32_t>(mapped.mapped) * plan->coefficient;
-                mapped.linear = entry.linear;
-                frame.before = frame.after = n.read_scalar(entry.linear);
-            }
+            if (mapped.mapped != logical)
+                linear = linear - logical * plan->coefficient +
+                         static_cast<std::uint32_t>(mapped.mapped) * plan->coefficient;
         } catch (const Error& error) {
-            auto& r = resolution();
-            log_error("access mapping/validation", n.name, &r.info);
-            return RegMmioReadResult{writing ? 0 : invalid, error.result};
+            return failed(error.result);
         } catch (...) {
-            auto& r = resolution();
-            log_error("access mapping/validation", n.name, &r.info);
-            return RegMmioReadResult{writing ? 0 : invalid, RegMemTxResult::DeviceError};
+            return failed(RegMemTxResult::DeviceError);
         }
+        if (unobserved && access_log_level(n) == HLOG_LEVEL_OFF)
+            return plain(linear, word_at(linear));
+        if (deferred)
+            populate();
+        mapped.linear = linear;
     }
-    if (pre_access_ || target->pre_access_chain) {
-        if (!pre(n, target->pre_access_chain, frame))
+    if (hooks) {
+        if (plan && mapped.mapped != logical)
+            frame.before = frame.after = word_at(linear);
+        if (!pre(n, bound.pre_access_chain, frame))
             return RegMmioReadResult{writing ? 0 : REG_READ_CALLBACK_ERROR_MAGIC & 0xffffffff,
                                      writing ? RegMemTxResult::Ignored : RegMemTxResult::Ok};
     }
-    auto* p = n.scalar_data + std::size_t(entry.linear) * n.scalar_stride;
-    std::uint32_t before;
-    std::memcpy(&before, p, 4);
+    auto* p = data_at(linear);
+    const auto before = plan || hooks ? word_at(linear) : logical_before;
     frame.before = frame.after = before;
     auto log = [&](RegData returned) {
-        if (access_log_enabled(n)) {
-            auto& r = resolution();
-            access_log(r, returned);
-        }
-    };
-    auto error = [&](std::string_view phase) {
-        if (log_enabled(HLOG_LEVEL_ERROR)) {
-            auto& r = resolution();
-            log_error(phase, n.name, &r.info);
-        }
+        if (const auto level = access_log_level(n); level != HLOG_LEVEL_OFF)
+            log_frame(level,
+                      writing ? "Write" : "Read",
+                      bound.node_layout->elements[linear].name,
+                      frame,
+                      returned);
     };
     if (writing) {
         const auto mask = std::uint32_t(n.writable_mask),
@@ -1209,7 +1127,7 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const CompiledA
             try {
                 fn->from_frame(before, frame);
             } catch (...) {
-                error("on_write");
+                log_error("on_write", n.name, frame);
             }
         return RegMmioReadResult{0};
     }
@@ -1219,7 +1137,7 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const CompiledA
         try {
             returned = fn->from_frame(returned, frame) & 0xffffffff;
         } catch (...) {
-            error("on_read");
+            log_error("on_read", n.name, frame);
             returned = REG_READ_CALLBACK_ERROR_MAGIC & 0xffffffff;
             source_ok = false;
         }
@@ -1229,7 +1147,7 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const CompiledA
             try {
                 fn->from_frame(returned, frame);
             } catch (...) {
-                error("on_read_complete");
+                log_error("on_read_complete", n.name, frame);
             }
     return RegMmioReadResult{returned};
 }
@@ -1238,30 +1156,11 @@ std::optional<RegData> RegisterMap::fast_scalar_resolved(Resolution& r, bool wri
     const auto& e = r.entry;
     auto& n = *e.node;
     if (r.info.size != 4 || e.byte_offset || !(n.scalar32_directions & (writing ? 2 : 1)) ||
-        n.borrowed || pre_access_ || r.alias.pre_access_chain)
+        pre_access_ || r.alias.pre_access_chain)
         return {};
-    if (logger_ && n.log_policy != LogPolicy::Hidden &&
-        (log_enabled(HLOG_LEVEL_DEBUG) || log_enabled(HLOG_LEVEL_TRACE)))
+    if (access_log_level(n) != HLOG_LEVEL_OFF)
         return {};
-    if (writing ? !n.write_callback : (!n.read_callback && !n.read_complete_callback)) {
-        auto* p = n.scalar_data + std::size_t(e.linear) * n.scalar_stride;
-        std::uint32_t stored;
-        std::memcpy(&stored, p, 4);
-        if (!writing)
-            return RegData(stored);
-        auto mask = std::uint32_t(n.writable_mask);
-        auto after = (stored & ~mask) | (std::uint32_t(r.info.raw_data) & mask);
-        std::memcpy(p, &after, 4);
-        return RegData{};
-    }
-    return scalar32_events(e, r.info, r.identity ? &*r.identity : nullptr, writing);
-}
-
-RegData RegisterMap::scalar32_events(const Entry& e,
-                                     RegAccessInfo& i,
-                                     const AccessIdentity* identity,
-                                     bool writing) {
-    auto& n = *e.node;
+    auto& i = r.info;
     auto* p = n.scalar_data + std::size_t(e.linear) * n.scalar_stride;
     std::uint32_t stored;
     std::memcpy(&stored, p, 4);
@@ -1279,8 +1178,10 @@ RegData RegisterMap::scalar32_events(const Entry& e,
             } catch (...) {
                 log_error("on_write", n.name, &i);
             }
-        return {};
+        return RegData{};
     }
+    if (!n.read_callback && !n.read_complete_callback)
+        return RegData(stored);
     RegData returned = stored;
     bool source_ok = true;
     if (auto* fn = n.read_callback.get())
@@ -1291,15 +1192,8 @@ RegData RegisterMap::scalar32_events(const Entry& e,
             returned = REG_READ_CALLBACK_ERROR_MAGIC & 0xffffffff;
             source_ok = false;
         }
-    // An on_read callback may enable logging before this read is logged.
-    if (logger_ && n.log_policy != LogPolicy::Hidden) {
-        auto level = log_enabled(HLOG_LEVEL_TRACE) ? HLOG_LEVEL_TRACE : HLOG_LEVEL_DEBUG;
-        if (n.log_policy == LogPolicy::Trace)
-            level = HLOG_LEVEL_TRACE;
-        if (log_enabled(level))
-            emit_log(
-                {level, "Read", e.view->elements[e.linear].name, &i, returned, {}, {}, identity});
-    }
+    // The read callback may have changed the log level.
+    access_log(r, returned);
     if (source_ok)
         if (auto* fn = n.read_complete_callback.get())
             try {
@@ -1310,34 +1204,71 @@ RegData RegisterMap::scalar32_events(const Entry& e,
     return returned;
 }
 
+template <bool Writing>
+REGFW_DETAIL_ALWAYS_INLINE inline std::optional<RegMmioReadResult> RegisterMap::try_fast_mmio(
+    std::uint64_t address, RegData value, unsigned size, const AliasEntry*& selected) {
+    if (!finalized_ || size != 4 || (address & 3))
+        return {};
+
+    detail::FormulaDecoder::PreparedHit hit;
+    Node* node = nullptr;
+    std::uint32_t linear;
+    const detail::ScalarAccessSite* site;
+    const RegElementIndex* index;
+    auto target = address;
+    if (formula_) {
+        if (!formula_->find_prepared(address, hit))
+            return {};
+        const auto& context = *hit.context;
+        using Path = detail::FormulaDecoder::Path;
+        const auto path = Writing ? context.write_path : context.read_path;
+        if (path == Path::Mapped)
+            return mapped_scalar<Writing>(address, value, hit);
+        if (path == Path::Scalar) {
+            node = context.node;
+            linear = context.binding->linear + hit.access->linear;
+            site = &context;
+            index = &hit.access->index;
+            target = hit.canonical(address);
+        }
+    } else {
+        if (!direct_scalar_mode_ || pre_access_)
+            return {};
+        const auto* entry = lookup_.get(address);
+        if (!entry || entry->byte_offset)
+            return {};
+        node = entry->node;
+        if (!(node->scalar32_directions & (Writing ? 2 : 1)) || !node->derivations.empty())
+            return {};
+        auto& direct = access_scratch_->direct_site;
+        direct.instance = entry->source_instance;
+        site = &direct;
+        linear = entry->linear;
+        index = &entry->view->elements[linear].index;
+    }
+    if (node)
+        if (auto result =
+                fast_scalar<Writing>(address, value, *node, linear, *site, *index, target))
+            return result;
+    if (hit.context) {
+        // A generic access (including enabled access logging) reuses the initial hit.
+        auto& entry = access_scratch_->decoded[0];
+        formula_->fill_prepared(hit, address, entry);
+        selected = &entry;
+    }
+    return {};
+}
+
 // Public MMIO entry points and QEMU adapters.
 RegMmioWriteResult
 RegisterMap::try_mmio_write_sized(std::uint64_t address, RegData value, unsigned size) {
     try {
-        DispatchGuard guard(*this);
-        warn_truncated_write(address, value, size);
-        const CompiledAccess* plan = nullptr;
-        if (finalized_ && size == 4 && !(address & 3)) {
-            if (compiled_view_mode_)
-                plan = formula_->fast_access(address, *access_scratch_);
-            else if (direct_scalar_mode_ && !pre_access_)
-                plan = direct_scalar(address);
-        }
-        const auto* selected = plan ? plan->metadata : nullptr;
-        if (plan) {
-            switch (plan->write_path) {
-                case CompiledAccess::Path::Scalar:
-                    if (fast_scalar<true>(address, value, plan))
-                        return {};
-                    break;
-                case CompiledAccess::Path::Mapped:
-                    if (auto fast = mapped_scalar<true>(address, value, plan))
-                        return {fast->result};
-                    break;
-                case CompiledAccess::Path::Generic:
-                    break;
-            }
-        }
+        if (logger_ && size < sizeof(value) && (value >> (size * 8)) &&
+            RegisterAccessWidthPolicy::size_bit(size))
+            warn_truncated_write(address, value, size);
+        const AliasEntry* selected = nullptr;
+        if (auto fast = try_fast_mmio<true>(address, value, size, selected))
+            return {fast->result};
         auto& r = resolve(address, size, RegTransactionKind::Write, value, selected);
         auto& n = *r.entry.node;
         auto& i = r.info;
@@ -1365,15 +1296,12 @@ RegisterMap::try_mmio_write_sized(std::uint64_t address, RegData value, unsigned
         auto index = r.entry.linear;
         auto old = n.read_scalar(index), mask = i.bus_mask & n.writable_mask;
         RegData result;
-        {
-            detail::NodeBorrow borrow(n);
-            result = n.apply_write(old, (old & ~i.bus_mask) | i.bus_data, mask);
-        }
+        result = n.apply_write(old, (old & ~i.bus_mask) | i.bus_data, mask);
         n.write_scalar(index, ((old & ~mask) | (result & mask)) & n.value_mask());
         i.stored_before = old;
         i.stored_after = n.read_scalar(index);
         access_log(r, i.stored_after);
-        auto fn = n.write_callback;
+        const auto* fn = n.write_callback.get();
         if (fn)
             try {
                 (*fn)(old, i);
@@ -1398,29 +1326,9 @@ RegMmioReadResult RegisterMap::try_mmio_read_sized(std::uint64_t address, unsign
                              ? INVALID_READ_VALUE & detail::low_mask(size * 8)
                              : 0;
     try {
-        DispatchGuard guard(*this);
-        const CompiledAccess* plan = nullptr;
-        if (finalized_ && size == 4 && !(address & 3)) {
-            if (compiled_view_mode_)
-                plan = formula_->fast_access(address, *access_scratch_);
-            else if (direct_scalar_mode_ && !pre_access_)
-                plan = direct_scalar(address);
-        }
-        const auto* selected = plan ? plan->metadata : nullptr;
-        if (plan) {
-            switch (plan->read_path) {
-                case CompiledAccess::Path::Scalar:
-                    if (auto fast = fast_scalar<false>(address, 0, plan))
-                        return {*fast};
-                    break;
-                case CompiledAccess::Path::Mapped:
-                    if (auto fast = mapped_scalar<false>(address, 0, plan))
-                        return *fast;
-                    break;
-                case CompiledAccess::Path::Generic:
-                    break;
-            }
-        }
+        const AliasEntry* selected = nullptr;
+        if (auto fast = try_fast_mmio<false>(address, 0, size, selected))
+            return *fast;
         auto& r = resolve(address, size, RegTransactionKind::Read, 0, selected);
         auto& n = *r.entry.node;
         auto& i = r.info;
@@ -1445,15 +1353,12 @@ RegMmioReadResult RegisterMap::try_mmio_read_sized(std::uint64_t address, unsign
         auto shift = i.internal_byte_offset * 8;
         auto before = n.read_scalar(index), after = before;
         RegData returned;
-        {
-            detail::NodeBorrow borrow(n);
-            returned = n.apply_read(after, i.bus_mask) & n.value_mask();
-        }
+        returned = n.apply_read(after, i.bus_mask) & n.value_mask();
         if (!n.scalar_data || n.custom_behavior || after != before)
             n.write_scalar(index, after & n.value_mask());
         i.stored_before = before;
         i.stored_after = n.scalar_data ? (after & n.value_mask()) : n.read_scalar(index);
-        auto fn = n.read_callback;
+        const auto* fn = n.read_callback.get();
         bool source_ok = true;
         if (fn)
             try {

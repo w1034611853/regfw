@@ -568,7 +568,7 @@ class RegScope {
     template <class T, std::size_t R, class B, bool A>
     REGFW_DETAIL_INIT_CTOR auto reg(std::string_view name, const RegisterSpec<R, B, A>& spec) {
         auto* node = reg_spec<detail::wide_value_v<T>>(name, spec, detail::storage_type<T>);
-        return RegView<T, R, !A>(node, 0, map->life_);
+        return RegView<T, R, !A>(node, 0);
     }
 
   private:

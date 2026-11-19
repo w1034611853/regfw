@@ -18,17 +18,18 @@ struct R : reg::RegEntityBundle {
     REG(TRACE_ONLY, std::uint32_t, reg::at(32).log(reg::LogPolicy::Trace));
     REG(HIDDEN, std::uint32_t, reg::at(36).log(reg::LogPolicy::Hidden));
 };
+template <bool ReadOnly>
 struct Root : reg::Bundle {
     REG_BUNDLE(Root);
     REG_REPEAT_ENTITY(vf, R, 2);
     REG_LAYOUT([](auto l) {
         return l.address_space("ROOT").map_repeat(
             "VF", 0x1000, reg::repeat(2).stride(0x100), [&](auto i) {
-                return l.view("VF", 0x100)
-                    .identity(7)
-                    .using_resolver(Route)
-                    .using_pre_access(Check)
-                    .map(l.vf[i]);
+                auto view = l.view("VF", 0x100).identity(7).using_resolver(Route).map(l.vf[i]);
+                if constexpr (ReadOnly)
+                    return view.read_only_error_writes();
+                else
+                    return view.using_pre_access(Check);
             });
     });
 };
@@ -39,11 +40,41 @@ std::string log_text() {
     std::ifstream f(path);
     return {std::istreambuf_iterator<char>(f), {}};
 }
+void deferred_resolver_error(HLogLogger* logger) {
+    reg::RegisterBank<Root<true>> bank(reg::space().name("DEFERRED"));
+    auto& map = bank.map();
+    map.set_identity_resolver(Route, [](const auto&) {
+        return 1u;
+    });
+    auto& words = bank->vf[1].TABLE;
+    map.set_access_resolver(P, [&](std::uint32_t, reg::RegData) -> std::uint32_t {
+        words.at(1).ref() = 99;
+        map.set_logger(logger);
+        throw std::runtime_error("deferred converter failed");
+    });
+    bank.finish();
+    words.at(1).ref() = 42;
+    const auto start = log_text().size();
+    CHECK(map.try_mmio_read_sized(0x1004, 4).result == reg::RegMemTxResult::DeviceError);
+    auto record = log_text().substr(start);
+    CHECK(record.find("ERROR access mapping/validation TABLE") != std::string::npos &&
+          record.find(" | L=1") != std::string::npos && record.find(" | P=") == std::string::npos &&
+          record.find("index=[1] | before=0x2a after=0x2a") != std::string::npos &&
+          record.find("deferred converter failed") != std::string::npos);
+
+    const auto denied = start + record.size();
+    CHECK(map.mmio_write(0x1004, 7).result == reg::RegMemTxResult::AccessError);
+    record = log_text().substr(denied);
+    CHECK(record.find("WARN alias write denied TABLE") != std::string::npos &&
+          record.find("=0->1") != std::string::npos &&
+          record.find("domain=7") != std::string::npos &&
+          record.find(" | L=") == std::string::npos && words.at(1).ref() == 99);
+}
 } // namespace
 int main() {
     auto* logger = hlog_register_logger("mapped032", "regfw-mapped032", HLOG_LEVEL_INFO);
     CHECK(logger);
-    reg::RegisterBank<Root> b(reg::space().name("MAP032"));
+    reg::RegisterBank<Root<false>> b(reg::space().name("MAP032"));
     auto& m = b.map();
     m.set_logger(logger);
     unsigned mode = 0, reads = 0, writes = 0, complete = 0;
@@ -108,4 +139,5 @@ int main() {
     CHECK(log_text().find("WRITE TRACE_ONLY") != std::string::npos);
     CHECK(m.mmio_write(0x1024, 3).success());
     CHECK(log_text().find("WRITE HIDDEN") == std::string::npos);
+    deferred_resolver_error(logger);
 }

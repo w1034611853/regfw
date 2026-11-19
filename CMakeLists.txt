@@ -17,6 +17,7 @@ add_library(regfw STATIC
   src/runtime/lifecycle.cpp
   src/runtime/storage.cpp
   src/snapshot/snapshot.cpp
+  src/snapshot/compact.cpp
   src/snapshot/state.cpp
   src/diagnostics/errors.cpp
   src/diagnostics/inspection.cpp
@@ -25,7 +26,7 @@ add_library(regfw STATIC
 )
 # Only first-party implementation files can see src/internal/*.
 target_include_directories(regfw PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-set_target_properties(regfw PROPERTIES POSITION_INDEPENDENT_CODE ON INTERPROCEDURAL_OPTIMIZATION FALSE)
+set_target_properties(regfw PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(regfw::regfw ALIAS regfw)
 # Single production backend: shared prepared EntityLayout Hash.
 target_compile_features(regfw PUBLIC cxx_std_20)

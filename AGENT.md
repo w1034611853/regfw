@@ -1,8 +1,16 @@
 # regfw 0.37.0：开发与集成约定
 
+本分支面向固定生命周期、单线程 QEMU SysBus 设备，基于无异步队列的 0.37。初始化顺序是：建立 bank → 注册全部 identity/index resolver、pre_access、读写/完成回调 → `finish()` → MMIO。`finish()` 同时冻结布局与绑定；之后 set/clear/首次注册均抛 Configuration，`defer_*` 不再允许未绑定依赖通过 finish。函数捕获的路由表、寄存器值及 logger 等级仍可变化，resolver 结果仍逐次求值。
+
+RegView 只借用实体存储，不持有生命周期计数，也不检测 bank 销毁。使用 view、原生引用及 bridge 时必须保持 bank 存活；移动 bank 保持实体地址。`is_alive()` 仅表示句柄已绑定。框架不再维护 MMIO 重入、entity borrow 或钩子退休保护；同一 map 的 MMIO/save/load 不可在回调中递归进入。这些是本分支的使用前提，不是运行时保护。
+
+流快照 `ar(bank)` / `bank.save(file)` 改为紧凑格式：布局 hash、实际位宽的实体值及活动事务，省去 schema 明细。无参 `bank.save()` 仍返回完整 `VersionedSnapshot` v2，供内存检查与兼容用途。旧版 bank 流不能直接由新版 load 读取，需要重新生成或在旧版解析为 VersionedSnapshot 后显式加载。头文件、库和设备必须配套重编译。详情见 [固定生命周期优化](docs/Performance-Fixed-Lifetime.md) 和 [快照格式](docs/Snapshot.md)。
+
+以下旧版本记录若涉及生命周期或流格式，以本节为准。
+
 代码导航见 [模块架构](docs/Architecture.zh-CN.md) 和 [私有实现目录](src/README.md)。`include/regfw/` 是稳定公开入口，`src/internal/` 不对外安装。本分支基于无异步的 0.37，保留前端 API，优化 MMIO 分发及单线程原生 RegView 访问。头文件与库必须配套重编译。
 
-此分支专用于单线程设备。RegView 的复制、销毁和访问及 Bank 生命周期也必须串行化：句柄使用普通引用计数，不提供并发引用计数保证。布局/Bundle 的冷路径仍使用 weak_ptr；访问回调和 RegAccessInfo 的语义不变。最新优化见 [MMIO 回调与按需上下文](docs/Performance-MMIO-Scalar.md)，此前结果见 [原生句柄性能](docs/Performance-Handles.md)、[MMIO 钩子](docs/Performance-Hooks.md) 和 [分发查表](docs/Performance-Dispatch.md)。
+此分支专用于单线程设备。RegView 的复制、销毁和访问及 Bank 生命周期也必须串行化：句柄只借用存储，不维护生命周期计数。布局/Bundle 的冷路径仍使用 weak_ptr；访问回调和 RegAccessInfo 的语义不变。最新优化见 [MMIO 回调与按需上下文](docs/Performance-MMIO-Scalar.md)，此前结果见 [原生句柄性能](docs/Performance-Handles.md)、[MMIO 钩子](docs/Performance-Hooks.md) 和 [分发查表](docs/Performance-Dispatch.md)。
 
 普通 scalar 回调借用挂载时准备的元数据；无参回调跳过 info 构造，其余回调在模板适配器中按实际使用优化。完整 info 的字段及复制语义不变。index resolver 的帧入口仅由 mapped 执行器调用，直接构造 mapped info，避免混入 scalar 装配影响优化。直接根 Bundle 在 finish 后、无 alias/identity/reserve/入口策略/instance window 时也可使用 scalar 执行器；不自动 finalize，不缓存动态钩子或 logger 开关。
 
@@ -58,7 +66,7 @@ struct CommandRegs : reg::RegEntityBundle {
 - on_write 的 `(T old,info)` 中 T 是**旧值**。新值用 stored_after；宽值用类型化 info / raw info.wide，或同步回调中读取实体。
 - on_read_complete 的 T 参数是本次响应快照；不要从 ref() 取 FIFO 读响应。
 - 所有回调属于整个 REG 实体，数组也只有一组回调槽；不能逐元素重复注册。按 info.index 分派。
-- 每种回调只可首次注册一次；resolver 可换绑。回调同步执行，没有自动线程/异步队列。
+- 每种回调只可首次注册一次且须在 finish 前；resolver 仅在 finish 前可换绑。回调同步执行，没有自动线程/异步队列。
 - 内部 ref()/原生 union/.data 访问跳过 MMIO、权限、behavior 和回调。
 
 ## 分拍事务与同地址不同读写含义
@@ -80,7 +88,7 @@ reg_bank.load(file);
 
 沿用 `hac::snapshot::Writer/Reader` → module_var_save/load，不使用 VMStateDescription。保存 Migratable 实体值及每元素的 write_pending/write_mask/read_snapshot/有效性/成功标记；半读/半写恢复后继续，不重放回调。Transient/Derived 有意排除。
 
-加载先验证全部 schema/状态和 payload，再提交，不使 bank 半恢复。格式 v2，旧 v1 拒绝。裸 dump_state(span)/restore_state(span) 仅值数组，不能用作完整事务快照。目标先初始化相同布局及回调；FIFO/路由表/线程等外部业务状态由父字段管理。指针、函数、logger、锁不保存。
+加载先验证布局 hash/状态和 payload，再提交，不使 bank 半恢复。流为 compact v1，无参 save() 的内存对象仍为 VersionedSnapshot v2。裸 dump_state(span)/restore_state(span) 仅值数组，不能用作完整事务快照。目标先初始化相同布局及回调；FIFO/路由表/线程等外部业务状态由父字段管理。指针、函数、logger、锁不保存。
 
 ## 并发与错误
 
@@ -133,7 +141,7 @@ reg_bank.map().set_pre_access(CheckBusiness,
 
 每次有效 MMIO beat 都调用，包括宽 REG 的暂存写和快照续读。RO 忽略写、入口权限拒绝、未映射/保留地址及 resolver 失败不会运行钩子。内部 ref()/data 更新、reset、save/load、describe_layout、explain_address 不运行钩子。
 
-命名键未绑定时 finish 报 Configuration；有意延迟绑定可 map.defer_pre_access(key)。之后可 set/clear/has_pre_access(key)；clear 只清该键，不影响全局钩子或其他键。已声明但未绑定的 View 钩子在访问时按钩子失败处理，不会静默放行；需要禁用时显式绑定空函数。重绑/clear 与 MMIO 由设备同步，不新增线程安全。
+命名键未绑定时 finish 报 Configuration，defer_pre_access 不绕过验证。set/clear 只能在 finish 前调用；has_pre_access 可随时查询。需要业务条件禁用时，在已绑定函数中判断捕获的状态。
 
 异常沿用原有 pre_access 行为：打印并停止后续钩子、behavior 和寄存器回调；写返回 Ignored，读返回 0（状态可能为 Ok），不回退其他映射。不要用此异常机制要求明确的总线 AccessError；此类需求仍在解析/验证阶段处理。钩子是 void，不使用返回 false 表达拒绝。
 
@@ -170,7 +178,7 @@ reg_bank.map().set_pre_access(CheckBusiness,
 
 静态索引按平均已用页密度选择：每页至少 256 个 word 使用常量页目录与页内 ID，较稀疏时使用 word hash；二者都在常量求值中生成。禁止为了页表把巨大高地址空洞实体化。密集/稀疏路径必须同时验证页内空洞、缺页、别名、保留区及 snapshot/late binding，不得把 hash 碰撞视为命中。
 
-## 0.29.0 直接路径选择与读写专用处理
+## 0.29.0（历史实现） 直接路径选择与读写专用处理
 
 finish 为 32 字节分发记录分别确定读/写的普通 scalar、mapped scalar 或 generic 路径；访问入口直接选择已确定的类别，普通与映射处理按读写分别编译。动态 logger/pre_access、借用状态、callback/resolver 换绑继续即时生效。处理类型按类别共享，不为每个寄存器生成独立函数；日志/错误/宽寄存器/事务/部分访问继续保留完整路径。
 

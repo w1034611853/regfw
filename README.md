@@ -1,10 +1,14 @@
 # regfw 0.37.0
 
-本分支基于 **0.37.0，无异步队列**，面向单线程 QEMU 设备，优化原生 `.at()` 访问和 MMIO 分发。前端 API 不变；头文件与库需配套重新编译。最新回调与按需 info 优化、性能结果和更新步骤见 [Performance-MMIO-Scalar](docs/Performance-MMIO-Scalar.md)，此前句柄优化见 [Performance-Handles](docs/Performance-Handles.md)。
+本分支面向固定生命周期、单线程 QEMU SysBus 设备，基于无异步队列的 0.37。初始化顺序是：建立 bank → 注册全部 identity/index resolver、pre_access、读写/完成回调 → `finish()` → MMIO。`finish()` 同时冻结布局与绑定；之后 set/clear/首次注册均抛 Configuration，`defer_*` 不再允许未绑定依赖通过 finish。函数捕获的路由表、寄存器值及 logger 等级仍可变化，resolver 结果仍逐次求值。
+
+RegView 只借用实体存储，不持有生命周期计数，也不检测 bank 销毁。使用 view、原生引用及 bridge 时必须保持 bank 存活；移动 bank 保持实体地址。`is_alive()` 仅表示句柄已绑定。框架不再维护 MMIO 重入、entity borrow 或钩子退休保护；同一 map 的 MMIO/save/load 不可在回调中递归进入。这些是本分支的使用前提，不是运行时保护。
+
+流快照 `ar(bank)` / `bank.save(file)` 改为紧凑格式：布局 hash、实际位宽的实体值及活动事务，省去 schema 明细。无参 `bank.save()` 仍返回完整 `VersionedSnapshot` v2，供内存检查与兼容用途。旧版 bank 流不能直接由新版 load 读取，需要重新生成或在旧版解析为 VersionedSnapshot 后显式加载。头文件、库和设备必须配套重编译。详情见 [固定生命周期优化](docs/Performance-Fixed-Lifetime.md) 和 [快照格式](docs/Snapshot.md)。
 
 **Production backend: runtime-built shared EntityLayout Hash.** Existing REG,
 REG_LAYOUT, REG_LAYOUT_IMPL, View/Repeat, resolver, callback, transaction and
-snapshot APIs are unchanged.
+snapshot call signatures are unchanged; binding lifetime and stream format follow the contract above.
 
 A static layout factory runs as ordinary native C++ **once per layout type**
 (on first use), creating compact binding/scope/array descriptions. A bank
@@ -27,7 +31,7 @@ See [0.37.0 重构报告](RELEASE-REPORT-0.37.0.md), [模块架构说明](docs/A
 [layout compilation](docs/LayoutCompilation.md), and
 [0.37.0 validation](VALIDATION.md).
 
-**0.37.0 只调整源码组织和格式，不调整公开 DSL、寄存器访问语义或快照格式。**
+原始 0.37.0 的重构记录见上面的历史报告；本优化分支额外改变绑定生命周期与流快照格式。
 
 C++20 寄存器框架。`REG_ENTITY` 创建存储，`reg::view(name,size)` 组合可复用的局部布局，`reg::address_space(name)` 将同一 View 挂载到多个 64 位地址入口。框架管理解码、回调、复位、事务与完整快照。
 

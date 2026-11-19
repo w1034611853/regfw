@@ -288,7 +288,6 @@ void priorities_and_warnings() {
     CHECK(warnings[0].message.find("low.VALUE") != std::string::npos &&
           warnings[0].message.find("high.VALUE") != std::string::npos);
     CHECK(warnings[0].message.find("priority") != std::string::npos);
-    b.finish();
     unsigned low_calls = 0, high_calls = 0;
     b->low.VALUE.on_write([&] {
         ++low_calls;
@@ -296,12 +295,13 @@ void priorities_and_warnings() {
     b->high.VALUE.on_write([&] {
         ++high_calls;
     });
-    CHECK(b.map().mmio_write(0, 42).success());
-    CHECK(b->high.VALUE.ref() == 42 && b->low.VALUE.ref() == 7 && high_calls == 1 &&
-          low_calls == 0);
     b->high.VALUE.on_read([]() -> std::uint32_t {
         throw std::runtime_error("no fallback");
     });
+    b.finish();
+    CHECK(b.map().mmio_write(0, 42).success());
+    CHECK(b->high.VALUE.ref() == 42 && b->low.VALUE.ref() == 7 && high_calls == 1 &&
+          low_calls == 0);
     CHECK(b.map().mmio_read(0) == 0 && b->low.VALUE.ref() == 7);
     reg::RegisterBank<Overlay<1>> ro(reg::space(0x100));
     ro.finish();

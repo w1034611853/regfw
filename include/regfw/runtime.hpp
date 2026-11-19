@@ -3,11 +3,15 @@
 #include "storage.hpp"
 #include "entity.hpp"
 #include "detail/static_plan.hpp"
-#include "detail/handle_lifetime.hpp"
 #include <hlog.h>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
 #include <new>
+#include <type_traits>
+#include <utility>
 
 namespace hlog {
 class Logger;
@@ -34,9 +38,8 @@ struct ScalarAccessSite {
     std::uint64_t target{};
     AccessRoute route;
     AliasAccessPolicy policy;
-    std::optional<std::uint32_t> instance, callback_instance;
+    std::optional<std::uint32_t> instance;
     std::string_view view_name;
-    const RegElementIndex* callback_index{};
     bool used{};
 };
 struct ScalarAccessFrame;
@@ -47,8 +50,8 @@ struct MappedIndexSite {
     unsigned dimension{};
 };
 struct MappedAccessFrame {
-    const ScalarAccessSite* source{};
-    const ScalarAccessSite* target{};
+    std::uint64_t source_address{}, target_address{};
+    std::string_view view_name;
     const MappedIndexSite* mapping{};
     const AccessIdentity* identity{};
     const RegElementIndex* request{};
@@ -67,6 +70,15 @@ struct MappedAccessFrame {
               StoredField* logical = nullptr,
               StoredField* physical = nullptr) const;
 };
+// Keep cleanup visible to the optimizer so unused info fields can disappear.
+// Limit forced inlining to destruction, without flattening device callbacks or
+// changing RegAccessInfo's aggregate/copy/move semantics.
+struct FrameAccessInfo final : RegAccessInfo {
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((always_inline, flatten))
+#endif
+    ~FrameAccessInfo() = default;
+};
 struct ScalarAccessFrame {
     const ScalarAccessSite* site;
     std::uint64_t address;
@@ -78,7 +90,7 @@ struct ScalarAccessFrame {
     std::uint64_t prepared_target{};
     template <class F>
     REGFW_DETAIL_ALWAYS_INLINE decltype(auto) with_mapped_info(F&& callback) const {
-        RegAccessInfo info;
+        FrameAccessInfo info;
         StoredField logical, physical;
         mapped->fill(info, *this, &logical, &physical);
         return std::forward<F>(callback)(info);
@@ -88,7 +100,7 @@ struct ScalarAccessFrame {
         // Separate lifetimes let the compiler discard unused scalar fields.
         if (mapped)
             return with_mapped_info(std::forward<F>(callback));
-        RegAccessInfo info;
+        FrameAccessInfo info;
         fill_scalar(info);
         return std::forward<F>(callback)(info);
     }
@@ -101,18 +113,17 @@ struct ScalarAccessFrame {
     REGFW_DETAIL_ALWAYS_INLINE void fill_scalar(RegAccessInfo& i) const {
         i.kind = kind;
         i.address = address;
-        i.alias_resolved_address = i.resolved_address =
-            prepared_index ? prepared_target : site->target;
+        i.alias_resolved_address = i.resolved_address = prepared_target;
         i.size = 4;
         i.register_width_bits = 32;
         i.bus_mask = 0xffffffff;
-        i.request_index = i.index = *(prepared_index ? prepared_index : site->callback_index);
+        i.request_index = i.index = *prepared_index;
         i.raw_data = i.bus_data = raw;
         i.stored_before = before;
         i.stored_after = after;
         i.route = site->route;
         i.alias_access_policy = site->policy;
-        i.source_instance = site->callback_instance;
+        i.source_instance = site->instance;
         i.view_path = site->view_name;
         i.is_alias = site->used;
     }
@@ -124,8 +135,8 @@ REGFW_DETAIL_ALWAYS_INLINE inline void MappedAccessFrame::fill(RegAccessInfo& i,
                                                                StoredField* physical) const {
     i.kind = f.kind;
     i.address = f.address;
-    i.alias_resolved_address = source->target;
-    i.resolved_address = target->target;
+    i.alias_resolved_address = source_address;
+    i.resolved_address = target_address;
     i.size = 4;
     i.internal_byte_offset = 0;
     i.register_width_bits = 32;
@@ -146,7 +157,7 @@ REGFW_DETAIL_ALWAYS_INLINE inline void MappedAccessFrame::fill(RegAccessInfo& i,
     i.route = route;
     i.alias_access_policy = policy;
     i.source_instance = instance;
-    i.view_path = target->view_name;
+    i.view_path = view_name;
     i.is_alias = used;
     i.access_group = group;
     if (identity) {
@@ -375,41 +386,25 @@ class ScalarReadSource {
 using WideReadSource = std::function<WideRegData(WideRegData, const RegAccessInfo&)>;
 } // namespace detail
 namespace detail {
-void* checked_value_pointer(EntityState* node,
-                            std::size_t index,
-                            const void* token,
-                            const detail::HandleLifetime& life,
-                            std::size_t rank,
-                            bool empty = false);
-void* checked_value_pointer(EntityState* node,
-                            std::size_t index,
-                            const void* token,
-                            const std::shared_ptr<void>& life,
-                            std::size_t rank,
-                            bool empty = false);
+void* checked_value_pointer(
+    EntityState* node, std::size_t index, const void* token, std::size_t rank, bool empty = false);
 } // namespace detail
 namespace detail {
-// Selection is compiled once; cheap single-threaded lifetime copies stay inline.
+// Non-owning selection. The device keeps its bank alive for every view use.
 class HandleState {
   protected:
     EntityState* node_{};
     std::size_t index_{};
     std::size_t count_{};
-    HandleLifetime lifetime_;
-    const bool* borrowed_{};
     std::weak_ptr<void> weak_lifetime() const;
     HandleState(const HandleState& parent, std::size_t index, std::size_t count, TrustedAccessTag)
-        : node_(parent.node_), index_(index), count_(count), lifetime_(parent.lifetime_),
-          borrowed_(parent.borrowed_) {
+        : node_(parent.node_), index_(index), count_(count) {
     }
-    [[noreturn]] static void expired_handle();
+    [[noreturn]] static void unbound_handle();
     [[noreturn]] static void element_out_of_range();
-    [[noreturn]] void borrowed_handle() const;
     void check() const {
-        if (!node_ || lifetime_.expired())
-            expired_handle();
-        if (*borrowed_)
-            borrowed_handle();
+        if (!node_)
+            unbound_handle();
     }
     EntityState* checked_node() const;
     std::size_t checked_element(std::size_t index) const {
@@ -428,14 +423,7 @@ class HandleState {
 
   public:
     HandleState();
-    HandleState(EntityState* node,
-                std::size_t index,
-                const detail::HandleLifetime& life,
-                std::size_t count = std::dynamic_extent);
-    HandleState(EntityState* node,
-                std::size_t index,
-                const std::shared_ptr<void>& life,
-                std::size_t count = std::dynamic_extent);
+    HandleState(EntityState* node, std::size_t index, std::size_t count = std::dynamic_extent);
     HandleState(const HandleState&) = default;
     HandleState(HandleState&&) noexcept = default;
     ~HandleState() = default;
@@ -627,29 +615,17 @@ class RegView final
     }
 
   private:
-    template <class Lifetime>
-    REGFW_DETAIL_ALWAYS_INLINE RegView(detail::EntityState* node,
-                                       std::size_t index,
-                                       const Lifetime& life,
-                                       std::size_t count = std::dynamic_extent)
-        : RegView(node,
-                  index,
-                  life,
-                  count,
-                  static_cast<T*>(detail::checked_value_pointer(node,
-                                                                index,
-                                                                &detail::value_type_token<T>,
-                                                                life,
-                                                                Rank,
-                                                                !ValueAccess && count == 0))) {
+    REGFW_DETAIL_ALWAYS_INLINE
+    RegView(detail::EntityState* node, std::size_t index, std::size_t count = std::dynamic_extent)
+        : RegView(
+              node,
+              index,
+              count,
+              static_cast<T*>(detail::checked_value_pointer(
+                  node, index, &detail::value_type_token<T>, Rank, !ValueAccess && count == 0))) {
     }
-    template <class Lifetime>
-    RegView(detail::EntityState* node,
-            std::size_t index,
-            const Lifetime& life,
-            std::size_t count,
-            T* value)
-        : Members(value), detail::HandleState(node, index, life, count), value_(value) {
+    RegView(detail::EntityState* node, std::size_t index, std::size_t count, T* value)
+        : Members(value), detail::HandleState(node, index, count), value_(value) {
     }
     RegView(const detail::HandleState& parent, std::size_t index, T* value, std::size_t count)
         : Members(value), detail::HandleState(parent, index, count, detail::TrustedAccessTag{}),
@@ -856,19 +832,19 @@ struct AccessResolverSlot {
     struct Function {
         using Full = std::function<RegData(const RegAccessInfo&)>;
         using Frame = std::function<RegData(const ScalarAccessFrame&)>;
+        using Coordinates = std::function<RegData(std::uint32_t, RegData)>;
         Full full;
         Frame frame;
-        Function(Full f, Frame p = {}) : full(std::move(f)), frame(std::move(p)) {
+        Coordinates coordinates;
+        Function(Full f, Frame p) : full(std::move(f)), frame(std::move(p)) {
         }
-        RegData operator()(const RegAccessInfo& i) const {
-            return full(i);
+        explicit Function(Coordinates c) : coordinates(std::move(c)) {
         }
-        RegData from_frame(const ScalarAccessFrame& f) const {
-            if (frame)
-                return frame(f);
-            RegAccessInfo i;
-            f.fill(i);
-            return full(i);
+        RegData operator()(const RegAccessInfo& i, RegData logical) const {
+            if (full)
+                return full(i);
+            return coordinates(i.resolved_identity.value_or(i.source_instance.value_or(0)),
+                               logical);
         }
     };
     std::string name;
@@ -876,17 +852,11 @@ struct AccessResolverSlot {
     CallbackDescription description;
     bool deferred{};
     bool required{};
-    RegData from_frame(const ScalarAccessFrame& frame) const {
-        auto fn = callback;
+    RegData operator()(const RegAccessInfo& info, RegData logical) const {
+        const auto* fn = callback.get();
         if (!fn)
             throw RegAccessDeriveError::device_error("access resolver is not bound: " + name);
-        return fn->from_frame(frame);
-    }
-    RegData operator()(const RegAccessInfo& info) const {
-        auto fn = callback; // May be cleared/replaced from inside the callback.
-        if (!fn)
-            throw RegAccessDeriveError::device_error("access resolver is not bound: " + name);
-        return (*fn)(info);
+        return (*fn)(info, logical);
     }
 };
 } // namespace detail
@@ -903,12 +873,9 @@ class RegisterMap {
     using Node = detail::EntityState;
     struct Entry;
     struct AliasEntry;
-    struct CompiledAccess;
     struct AliasHop;
     struct Resolution;
     struct AddressResolution;
-    struct DispatchGuard;
-    struct PreAccessGuard;
     struct AccessScratch;
     std::unique_ptr<AccessScratch> access_scratch_;
     struct InstanceWindow;
@@ -920,7 +887,6 @@ class RegisterMap {
     // the per-word tables were removed. Installed by install_formula_layout
     // and the dynamic AddressSpace compiler alike.
     std::unique_ptr<detail::FormulaDecoder> formula_;
-    bool compiled_view_mode_{};
     bool direct_scalar_mode_{};
     std::vector<LayoutWarning> mapping_warnings_;
     std::vector<std::unique_ptr<std::string>> compiled_names_;
@@ -937,7 +903,7 @@ class RegisterMap {
     HLogLogger* logger_{};
     bool log_enabled(HLogLevel level) const noexcept;
     void emit_log(const detail::LogRecord& record) const noexcept;
-    bool finalized_{}, dispatching_{}, pre_access_active_{};
+    bool finalized_{};
     struct ViewPolicy {
         std::uint64_t base, size;
         AliasAccessPolicy policy;
@@ -953,7 +919,6 @@ class RegisterMap {
     bool identity_deferred_{};
     IdentityRejectionPolicy identity_rejection_policy_ = IdentityRejectionPolicy::AccessError;
     std::shared_ptr<const PreFn> pre_access_;
-    std::vector<std::shared_ptr<const PreFn>> retired_pre_access_;
     // Slots are sparse, but resolver lookup is outside the ordinary MMIO path.
     struct ResolverRegistry;
     std::unique_ptr<ResolverRegistry> access_resolvers_;
@@ -983,8 +948,6 @@ class RegisterMap {
     void emit_resolver_update(std::string_view key,
                               const detail::CallbackDescription& description,
                               bool bound) const noexcept;
-    void release_retired_pre_access() noexcept;
-    void retire_pre_access(const std::shared_ptr<const PreFn>& callback);
     void bind_pre_access(std::shared_ptr<const PreFn> callback);
     std::shared_ptr<detail::PreAccessSlot> view_pre_access_slot(const void* key,
                                                                 std::string_view name);
@@ -1002,12 +965,15 @@ class RegisterMap {
     std::optional<std::uint32_t> source_instance(std::uint64_t address) const;
     const detail::AddressWindow* window_at(std::uint64_t address) const;
     void mutable_layout() const;
+    void mutable_bindings() const;
     void region_check(std::uint64_t base, std::uint64_t n) const;
     AliasEntry
     walk_alias(std::uint64_t original, unsigned size, std::vector<AliasHop>* hops = nullptr) const;
     AliasEntry resolve_static(std::uint64_t address, unsigned size) const;
-    // Selected view entry for an address: formula decode or the word table.
-    const AliasEntry* view_entry(std::uint64_t address, AliasEntry& scratch) const;
+    inline AccessIdentity
+    resolve_identity(const detail::IdentityWindow& window,
+                     const IdentityResolveRequest& request,
+                     std::source_location at = std::source_location::current()) const;
     AddressResolution resolve_metadata(std::uint64_t address, unsigned size);
     Resolution& resolve(std::uint64_t address,
                         unsigned size,
@@ -1020,27 +986,37 @@ class RegisterMap {
                              RegTransactionKind kind,
                              RegData value,
                              const AliasEntry* selected);
-    const CompiledAccess* direct_scalar(std::uint64_t address);
-    template <bool Writing>
-    std::optional<RegData>
-    fast_scalar(std::uint64_t address, RegData value, const CompiledAccess* selected);
-    std::optional<RegData> fast_scalar_resolved(Resolution& r, bool writing);
     template <bool Writing>
     std::optional<RegMmioReadResult>
-    mapped_scalar(std::uint64_t address, RegData value, const CompiledAccess* selected);
-    RegData scalar32_events(const Entry& e,
-                            RegAccessInfo& info,
-                            const AccessIdentity* identity,
-                            bool writing);
+    try_fast_mmio(std::uint64_t address, RegData value, unsigned size, const AliasEntry*& selected);
+    template <bool Writing>
+    std::optional<RegMmioReadResult> fast_scalar(std::uint64_t address,
+                                                 RegData value,
+                                                 Node& node,
+                                                 std::uint32_t linear,
+                                                 const detail::ScalarAccessSite& site,
+                                                 const RegElementIndex& index,
+                                                 std::uint64_t target);
+    std::optional<RegData> fast_scalar_resolved(Resolution& r, bool writing);
+    template <bool Writing, class Selection>
+    RegMmioReadResult mapped_scalar(std::uint64_t address, RegData value, const Selection& source);
     void validate_access(const Resolution& r) const;
     void derive(Resolution& r);
     std::optional<RegMemTxResult> prepare(Resolution& r);
     bool pre(Resolution& r);
     template <class Context>
     bool pre(const Node& node, const detail::ViewPreAccessChain* chain, const Context& context);
-    bool access_log_enabled(const Node&) const noexcept;
+    HLogLevel access_log_level(const Node&) const noexcept;
     void
     access_log(const Resolution& r, RegData value, std::string_view action = {}) const noexcept;
+    void log_frame(HLogLevel level,
+                   std::string_view phase,
+                   std::string_view name,
+                   const detail::ScalarAccessFrame& frame,
+                   RegData value) const noexcept;
+    void log_error(std::string_view phase,
+                   std::string_view name,
+                   const detail::ScalarAccessFrame& frame) const noexcept;
     void log_error(std::string_view phase,
                    std::string_view name,
                    const RegAccessInfo* info = nullptr) const noexcept;
@@ -1137,7 +1113,7 @@ class RegisterMap {
                                            std::optional<std::uint32_t> instance = {}) {
         auto* node = create_spec<detail::wide_value_v<T>>(
             address, std::move(name), spec, detail::storage_type<T>, instance);
-        return RegView<T, R, !A>(node, 0, life_);
+        return RegView<T, R, !A>(node, 0);
     }
     template <class T>
     auto create_reg(std::uint64_t address,
@@ -1259,7 +1235,7 @@ class RegisterMap {
         mutable_layout();
         identity_deferred_ = true;
     }
-    // Binding is independent of layout finalization; existing plans retain this stable slot.
+    // Plans retain stable slots; registration is frozen together with the layout.
   private:
     template <class Tag, class V>
     std::shared_ptr<detail::AccessResolverSlot> access_resolver_slot(FieldKey<Tag, V> key) {
@@ -1267,6 +1243,8 @@ class RegisterMap {
     }
 
   public:
+    // The two-argument form receives the resolved identity (or the source
+    // instance, defaulting to zero) and this mapping's logical source value.
     template <class Tag, class V, class F>
     void set_access_resolver(FieldKey<Tag, V> key,
                              F f,
@@ -1279,17 +1257,25 @@ class RegisterMap {
                              F f,
                              std::source_location at = std::source_location::current()) {
         auto callable = std::make_shared<F>(std::move(f));
-        auto callback = std::make_shared<const detail::AccessResolverSlot::Function>(
-            [callable](const RegAccessInfo& info) {
-                return detail::checked_access_result<V>(std::invoke(*callable, info));
-            },
-            [callable](const detail::ScalarAccessFrame& frame) {
-                // Frame-based index resolution is only called by mapped_scalar.
-                // Keep scalar info assembly out of this adapter entirely.
-                return frame.with_mapped_info([&](const RegAccessInfo& i) {
-                    return detail::checked_access_result<V>(std::invoke(*callable, i));
+        using Function = detail::AccessResolverSlot::Function;
+        std::shared_ptr<const Function> callback;
+        if constexpr (std::is_invocable_v<F&, const RegAccessInfo&>) {
+            callback = std::make_shared<Function>(
+                [callable](const RegAccessInfo& info) {
+                    return detail::checked_access_result<V>(std::invoke(*callable, info));
+                },
+                [callable](const detail::ScalarAccessFrame& frame) {
+                    return frame.with_mapped_info([&](const RegAccessInfo& i) {
+                        return detail::checked_access_result<V>(std::invoke(*callable, i));
+                    });
                 });
+        } else {
+            static_assert(std::is_invocable_v<F&, std::uint32_t, RegData>,
+                          "index resolver must accept RegAccessInfo or (vf, logical)");
+            callback = std::make_shared<Function>([callable](std::uint32_t vf, RegData logical) {
+                return detail::checked_access_result<V>(std::invoke(*callable, vf, logical));
             });
+        }
         bind_access_resolver(
             key.id(), key.name, std::move(callback), detail::callback_description<F>(name, at));
     }
@@ -1380,6 +1366,9 @@ class RegisterMap {
 
   private:
     std::vector<Node*> snapshot_nodes() const;
+    void restore_snapshot_payload(std::span<Node* const> nodes,
+                                  std::span<const RegData> data,
+                                  std::span<const SnapshotEntityRuntime> runtime);
 
   public:
     SnapshotSchema snapshot_schema() const;
@@ -1394,6 +1383,10 @@ class RegisterMap {
 
     VersionedSnapshot dump_state_versioned() const;
     void restore_state_versioned(const VersionedSnapshot& snapshot);
+    // Compact archive payload: layout digest, packed values and active transactions.
+    std::size_t max_compact_snapshot_words() const;
+    std::vector<RegData> dump_state_compact() const;
+    void restore_state_compact(std::span<const RegData> payload);
 };
 
 

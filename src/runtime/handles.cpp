@@ -7,44 +7,24 @@ namespace reg {
 
 namespace detail {
 HandleState::HandleState() = default;
-HandleState::HandleState(EntityState* node,
-                         std::size_t index,
-                         const HandleLifetime& life,
-                         std::size_t count)
-    : node_(node), index_(index), lifetime_(life),
-      borrowed_(node && !life.expired() ? &node->borrowed : nullptr) {
+HandleState::HandleState(EntityState* node, std::size_t index, std::size_t count)
+    : node_(node), index_(index) {
     check();
     if (index > node->element_count() ||
         (count != std::dynamic_extent && count > node->element_count() - index))
         throw Error("register view extent out of range", ErrorKind::Access);
     count_ = count == std::dynamic_extent ? node->element_count() - index : count;
 }
-HandleState::HandleState(EntityState* node,
-                         std::size_t index,
-                         const std::shared_ptr<void>& life,
-                         std::size_t count)
-    : HandleState(node, index, HandleLifetime(life), count) {
-}
-std::shared_ptr<void> make_handle_lifetime() {
-    return std::shared_ptr<void>(new HandleLifetimeState, [](void* value) {
-        auto* state = static_cast<HandleLifetimeState*>(value);
-        state->alive = false;
-        HandleLifetime::release(state);
-    });
-}
 std::weak_ptr<void> HandleState::weak_lifetime() const {
     return is_alive() ? node_->owner->lifetime() : std::weak_ptr<void>{};
 }
 } // namespace detail
 namespace detail {
-void HandleState::expired_handle() {
-    throw Error("register handle outlived its map");
+void HandleState::unbound_handle() {
+    throw Error("register handle is not bound");
 }
 void HandleState::element_out_of_range() {
     throw Error("register view element out of range", ErrorKind::Access);
-}
-void HandleState::borrowed_handle() const {
-    throw Error("reentrant register access from a behavior: " + node_->name);
 }
 std::size_t HandleState::checked_element(RegElementIndex index) const {
     check();
@@ -74,7 +54,7 @@ EntityState* HandleState::checked_node() const {
     return node_;
 }
 bool HandleState::is_alive() const noexcept {
-    return node_ && !lifetime_.expired();
+    return node_ != nullptr;
 }
 std::size_t HandleState::size() const {
     if (!node_)
