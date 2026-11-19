@@ -1,7 +1,9 @@
 #include <regfw/regfw.hpp>
+#include <array>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #define CHECK(...)                                                                                 \
     do {                                                                                           \
@@ -135,6 +137,45 @@ void read_only_and_truncation(HLogLogger* logger) {
     (void)wide;
     (void)high;
 }
+void wide_hex_formatting() {
+    CHECK(reg::WideUInt<65>::from_words({1, 1}).hex() == "10000000000000001");
+    CHECK(reg::WideUInt<127>::mask(127).hex() == "7" + std::string(31, 'f'));
+    CHECK(reg::WideUInt<129>::from_words({11, 0, 1}).hex() == "1" + std::string(31, '0') + "b");
+    reg::WideRegData wide;
+    CHECK(wide.hex() == "0" && wide.hex(true) == std::string(512, '0'));
+    wide = 0xbc;
+    CHECK(wide.hex() == "bc" && wide.hex(true) == std::string(510, '0') + "bc");
+    wide.set_bit(2047, true);
+    CHECK(wide.hex() == "8" + std::string(509, '0') + "bc");
+}
+void truncation_widths(HLogLogger* logger, std::ifstream& log) {
+    reg::RegisterMap map(0x20, "TRUNCATION_WIDTHS", logger);
+    map.create_reg<std::uint64_t>(0x10, "VALUE");
+    map.finalize();
+    log.clear();
+    log.seekg(0, std::ios::end);
+    for (unsigned size : {1u, 2u, 4u}) {
+        const auto overflow = reg::RegData{1} << (size * 8);
+        CHECK(map.mmio_write_sized(0x10, overflow, size).success());
+        CHECK(map.mmio_write_sized(0x10, overflow - 1, size).success());
+    }
+    CHECK(map.mmio_write_sized(0x10, UINT64_MAX, 8).success());
+    for (unsigned size : {0u, 3u, std::numeric_limits<unsigned>::max()})
+        CHECK(map.mmio_write_sized(0x10, UINT64_MAX, size).result ==
+              reg::RegMemTxResult::Unsupported);
+
+    hlog_flush();
+    constexpr std::array expected{
+        "size=1B | write=0x100", "size=2B | write=0x10000", "size=4B | write=0x100000000"};
+    std::size_t count = 0;
+    for (std::string line; std::getline(log, line);) {
+        if (line.find("WARN write-truncation TRUNCATION_WIDTHS ") == std::string::npos)
+            continue;
+        CHECK(count < expected.size() && line.ends_with(expected[count]));
+        ++count;
+    }
+    CHECK(count == expected.size());
+}
 void lint_and_explain() {
     reg::RegisterMap map(0x400, "EXPLAIN");
     auto item =
@@ -222,6 +263,7 @@ void lint_and_explain() {
 int main() try {
     auto* logger = hlog_register_logger("diagnostics", "verification", HLOG_LEVEL_WARN);
     CHECK(logger);
+    wide_hex_formatting();
     declaration_errors();
     read_only_and_truncation(logger);
     lint_and_explain();
@@ -237,6 +279,7 @@ int main() try {
           log.find("required first beat byte offset=0") != std::string::npos);
     CHECK(log.find("register=HIGH128") != std::string::npos &&
           log.find("required first beat byte offset=12") != std::string::npos);
+    truncation_widths(logger, file);
     std::cout << "PASS: declaration facts, RO suppression, truncation/beat diagnostics, lint and "
                  "side-effect-free explanations\n";
 } catch (const std::exception& e) {

@@ -16,6 +16,8 @@ target_link_libraries(device PRIVATE regfw::regfw)
 
 `regfw::regfw` 传播 C++20、公共头目录及 GNU/Clang 的 `-fno-strict-aliasing`（原生 union 的 raw/bitfield 访问需要）。用户自定义寄存器组的构造实现属于设备代码，仍应加到设备 target 中。可用 `regfw_precompile_bundle(device, "device_regs.hpp")` 启用提供的 PCH 辅助函数（由 bundle_pch 测试端到端覆盖）。设备声明头建议使用 `REG_LAYOUT_DECL` 并包含 `<regfw/bundle.hpp>`，把大布局实现留在包含完整入口的 .cpp，这样 PCH 缓存的头部本身不再携带 constexpr 布局编译器。
 
+链接时优化（LTO）默认关闭。可在配置父工程时加 `-DCMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE=ON`，让 Release 下的 regfw 和设备目标一起启用 LTO。使用已安装的静态库时，在构建 SDK 和配置设备工程时分别启用该选项。GCC 的 LTO 对象需要匹配的编译器工具链；若 QEMU 使用其他构建系统，也要在设备翻译单元和最终可执行文件的链接步骤启用 `-flto`。
+
 只构建公开示例、不编测试程序：
 
 ```sh

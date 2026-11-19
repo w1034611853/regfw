@@ -1304,7 +1304,9 @@ REGFW_DETAIL_ALWAYS_INLINE inline std::optional<RegMmioReadResult> RegisterMap::
 RegMmioWriteResult
 RegisterMap::try_mmio_write_sized(std::uint64_t address, RegData value, unsigned size) {
     try {
-        warn_truncated_write(address, value, size);
+        if (logger_ && size < sizeof(value) && (value >> (size * 8)) &&
+            RegisterAccessWidthPolicy::size_bit(size))
+            warn_truncated_write(address, value, size);
         const AliasEntry* selected = nullptr;
         if (auto fast = try_fast_mmio<true>(address, value, size, selected))
             return {fast->result};

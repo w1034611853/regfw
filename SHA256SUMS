@@ -3,7 +3,7 @@
 bc6db4cb64b4da542d67fd212798ea595304293d2a0dd0c6d5a98460c535277f  ./.gitignore
 c2b48430f6e97c9d7810dca69adc119cc9e36786661213fae8caa7b6b132cd3c  ./AGENT.md
 a2b7d56d623c4b71ebad457a4fa8ed4b15e5feac6b700ce59a2e91d0f6c2d86e  ./CHANGELOG.md
-a1c09b7baf3b6a92e33a5b8290219996c28f6a822d983d6d3520ea17e2c15079  ./CMakeLists.txt
+e3dfbafa0fc1228076d8301f17eec4f7502dffb1083b0b5571be840770ff1e6c  ./CMakeLists.txt
 225d958f819abb932f52f63ed38787165466a9e8d289ff0d469f266865674d77  ./README.md
 41cba57d500599c145127e5ce8575983dc12e847c2ca2e25befed5171f979bfb  ./RELEASE-REPORT-0.37.0.md
 f4f1186f4583800ce46f80860f31715a700becce0d213f396ee858b763549db4  ./VALIDATION.md
@@ -55,12 +55,12 @@ f9dc65f0259039099894b920f68234fb7e23f24a9d1abf2c8fec352c317d5c3e  ./docs/Archite
 82c21d0615bc311667370f7b8f74b722a78ece2ff56956b73e9c98f1f7556950  ./docs/Device.md
 34349d2caba4b6d06154fdb7be0faf3a5b8f50d2a84c74f6b134e1bdf58c32e3  ./docs/Diagnostics.md
 29b20c21a1167433ba403f8576c7caa8a8e6317d9dee0bc9121be8df4acc5e5d  ./docs/FormulaBackend.md
-b2b7860910504923d26a5d9a71a6fc3c0e69e9c08d56b872214cc6da83d63b8c  ./docs/Integration.md
+8fb86d20b033e5e8608acf1c3e41021920eb2850a6b314612be356d8f1a988a4  ./docs/Integration.md
 210a551373d7d5067264301ad30589ad77673ec6a983ffcc2b1b41047c3cc7ff  ./docs/LayoutCompilation.md
 1834f6cd58f30371e88d08b3273e3d86e1109e109800ad970360ba2999fbd693  ./docs/LegacyStaticLayout.md
 1010f7d6062364eb5b6f1017ab7bfc565456a82ff5f4882ff7c915b2db719765  ./docs/Migration.md
 5a42421d130073c609ef82bcc030a86ee515c6a1c3c89b0a233ff5767e874540  ./docs/Performance-Dispatch.md
-869b972052ddd75df198f67c24f2291a083ae012a749f8c671a7e52f5c8dff1f  ./docs/Performance-Fixed-Lifetime.md
+34c5a084f8991076b2abf1b95b5051ee6109dc6349985e6a3d3edcd1416ec5f9  ./docs/Performance-Fixed-Lifetime.md
 26e142a4af28e2b5d1268512ca07ec7943e1579e00a32cba06c72f43b9abbcb1  ./docs/Performance-Handles.md
 dcd66475f538275ac4d23cec9b33cb785881a8765fa0b26c5ae66ef191aa68e5  ./docs/Performance-Hooks.md
 20566ba080865c04f4bad4c18ee8bcfe9725ed210e7576b6622250f6af4e3949  ./docs/Performance-MMIO-Scalar.md
@@ -103,7 +103,7 @@ ce293fec380111f9b9b8705458734a77a101d2dde89cc853c0937c05a2113463  ./include/regf
 52f8cfd5db10a42a4430e5d4f0423520d5cc852b52344d2b51b328c2acc7ebed  ./include/regfw/diagnostics.hpp
 3ea4fd7f534594e53593fddc50b5d1edd860d4c17fa8ab7f733fe36651df73a7  ./include/regfw/dsl.hpp
 e9e44ea898555b84ee78fae851865a7c6842606043365fa93792c58afc272ddf  ./include/regfw/entity.hpp
-166e707963b44bc9f747a2a6c8b75679cfc40293c9a932736d34365a808dce28  ./include/regfw/fixed_uint.hpp
+4b2b5b9959d4010ee32124a7227d25ba3f2dc69201c8f44e32b590a21c18ee4d  ./include/regfw/fixed_uint.hpp
 90ea6a7df6067d8b2fa27a8f7f84fff5699c970fee8e9439638712630c97ada3  ./include/regfw/layout_titles.hpp
 a80044b973ffe877e1d40dc80a6cb3be9e336ee7882db90e13f8c98c9a1055d3  ./include/regfw/qemu_bridge.h
 ffe136a31e661ab38dbf45e4d363f271935d6450190220f605f93f8eb1dc0f78  ./include/regfw/regfw.hpp
@@ -123,7 +123,7 @@ ef5ab5ac7430841dbc76f0d80dbaec9d22f2e0402ff08d410cd758e72ba6007c  ./src/README.m
 fd08fefe0c5e91af49e53a127a5273852239016dfaf60649fd8247ff51beeee6  ./src/diagnostics/errors.cpp
 83537c62008dcc893750f8cb5a455a7dc0fc3730316e5e4826be9db621512560  ./src/diagnostics/inspection.cpp
 3757277d11b82a35f3678be89c1f4fcabb2d1697db18aede281deba6b4af2a63  ./src/diagnostics/layout_report.cpp
-3b1446d5bbc8d1027a687c5f475f8c4e3fac4203f1c0733777edba5a1e90c03d  ./src/diagnostics/logging.cpp
+e863be0d0791a2d96bc8073064aa879e5fa0d61e1bb269f4db15669b99b39390  ./src/diagnostics/logging.cpp
 b53ab9c42559735ad72ca2a25c82891dc07fc5055d7a5cbb24023ce7a54d5323  ./src/dsl/declarations.cpp
 ef62df703036ca18062acc0759b92da3bb5246245857540fced7e88b3fffde72  ./src/internal/access_context.hpp
 267fe8a00233b5d9a16e5c7e8886aed3d039ab938815df55e9c829bb479b7271  ./src/internal/entity_state.hpp
@@ -133,7 +133,7 @@ bec39e4aa80e51ee0738617e174ff7c8b4e1547ea46e1d90cb7d4429b49d27f8  ./src/internal
 0e296daef1826e1b997ec764497e59dd64da1d134a30a08d9751d90820adefa4  ./src/layout/address_view.cpp
 77278f66e96e9860535564cbd7b800c7a9c56e26caa0e532a604f8459654113b  ./src/layout/formula.cpp
 ea90a28d99de43cd9dcfa14000afebb4b75acfcf3edf6c6a4164b3575fa7c19a  ./src/layout/instantiate.cpp
-8c98d8bad8cb79678072bf63d0fa484a63a12d8c0cbb9dc86925379136f57479  ./src/runtime/access.cpp
+4d91810fc505510db314cad8b6c46e7b03638db9964bc3ef08b97fb8225b2008  ./src/runtime/access.cpp
 e43635113259f1449ce643c236e41827c149c4c483226ea28ec388e2a5cbb7dd  ./src/runtime/behaviors.cpp
 939c8852a058691a031e54560b40f3a2c0a631a2cede1768464a28ab2f49428e  ./src/runtime/bindings.cpp
 5e8ef4e5f941058c84af225b4e2a9efe23c2a73f5e59d36d299c34dc8cf6704e  ./src/runtime/callbacks.cpp
@@ -148,7 +148,7 @@ d2316f2998a5a2f0988027bff4dc67ae71e98a2d0f55b697b0a85b909159c2d6  ./tests/addres
 dc93fd6376a634e2a6b988c6e45a897b746c52f37c7ab17687b6130782181b80  ./tests/bundle_light.hpp
 adf928208e8fe9d5ae28bdd76210518118274c38d6e788824520c7de7451a589  ./tests/bundle_light_consumer.cpp
 9f5b3a3cc9477911ddd238b1a0d230abd837c91580be140967ebe3a91eb51480  ./tests/bundle_light_impl.cpp
-ea26dcd9ac983354a51862c114fec99bab0cabe24ab78c10608e13f01aca73b4  ./tests/diagnostics.cpp
+33501f7c161f38da4904546cb1ee8b18159764d364bc6181017f7e4b8303dca9  ./tests/diagnostics.cpp
 f1c9109f8b317506da45b43c91d00eb4507ed0cf0185a393b3cfd87904b59a33  ./tests/dispatch_index.cpp
 51326e8c7ebd1509fa6a4cdf7c466d592af5b6ac03610123215c79f7f0662035  ./tests/entity_view.cpp
 57ec24ec032f5d243fd6e2cb5557fd59f7be8891857b1f5c7e1f123b3595b5c5  ./tests/fast_path.cpp

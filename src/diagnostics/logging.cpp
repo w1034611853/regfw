@@ -17,8 +17,7 @@ std::string detail::declaration(std::string_view name,
 void RegisterMap::warn_truncated_write(std::uint64_t address,
                                        RegData value,
                                        unsigned size) const noexcept {
-    if (size >= 8 || !RegisterAccessWidthPolicy::size_bit(size) ||
-        !(value & ~detail::low_mask(size * 8)) || !log_enabled(HLOG_LEVEL_WARN))
+    if (!log_enabled(HLOG_LEVEL_WARN))
         return;
     const detail::FailedAccess request{RegTransactionKind::Write, address, value, size};
     detail::LogRecord record{HLOG_LEVEL_WARN,
