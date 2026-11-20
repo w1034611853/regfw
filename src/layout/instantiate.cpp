@@ -255,18 +255,19 @@ std::vector<std::uint64_t> RegScope::prepare_reg(std::string_view name,
             throw Error("scope dimension overflow", ErrorKind::Configuration);
         count *= d;
     }
+    if (const auto contiguous = contiguous_span(spec.dimensions, spec.stride_bytes, occupied)) {
+        check_claim(spec.offset, contiguous, name, spec.location);
+        // finish_reg only needs the start of a contiguous claim.
+        return {spec.offset};
+    }
     std::vector<std::uint64_t> addresses;
     addresses.reserve(count);
-    const auto contiguous = contiguous_span(spec.dimensions, spec.stride_bytes, occupied);
-    if (contiguous)
-        check_claim(spec.offset, contiguous, name, spec.location);
     for (std::size_t k = 0; k < count; ++k) {
         auto index = RegElementIndex::from_dims(spec.dimensions, k);
         auto address = spec.offset;
         for (std::size_t d = 0; d < spec.dimensions.size(); ++d)
             address += std::uint64_t(index.values[d]) * spec.stride_bytes[d];
-        if (!contiguous)
-            check_claim(address, occupied, name, spec.location);
+        check_claim(address, occupied, name, spec.location);
         addresses.push_back(address);
     }
     return addresses;
