@@ -63,13 +63,25 @@ class FormulaDecoder {
     };
     static_assert(sizeof(PreparedAccessInfo) == 16);
     struct EntityHashLayout {
-        std::unordered_map<std::uint64_t, PreparedAccessInfo> words;
+        struct SparseSlot {
+            std::uint64_t key{UINT64_MAX};
+            PreparedAccessInfo access{};
+        };
         bool has_priority_aliases{};
         // Compact spans use direct indexing; sparse/high addresses keep the
         // hash. This table is built once at installation, never by consteval.
         std::vector<PreparedAccessInfo> dense;
         std::uint64_t dense_base{};
-        std::size_t key_count{};
+        std::vector<SparseSlot> sparse;
+        std::size_t sparse_mask{}, key_count{};
+        static std::size_t hash_key(std::uint64_t key, std::size_t mask) noexcept {
+            // Mix every address bit before masking. Multiplication alone leaves
+            // high-stride arrays clustered when low address bits are identical.
+            key >>= 2;
+            key = (key ^ (key >> 30)) * 0xbf58476d1ce4e5b9ULL;
+            key = (key ^ (key >> 27)) * 0x94d049bb133111ebULL;
+            return static_cast<std::size_t>(key ^ (key >> 31)) & mask;
+        }
         const PreparedAccessInfo* find(std::uint64_t key) const noexcept {
             if (!dense.empty()) {
                 const auto index = (key - dense_base) >> 2;
@@ -78,10 +90,19 @@ class FormulaDecoder {
                 const auto& access = dense[index];
                 return access.ordinal == STATIC_NONE ? nullptr : &access;
             }
-            const auto it = words.find(key);
-            return it == words.end() ? nullptr : &it->second;
+            if (sparse.empty())
+                return nullptr;
+            auto slot = hash_key(key, sparse_mask);
+            for (;;) {
+                const auto& entry = sparse[slot];
+                if (entry.key == UINT64_MAX)
+                    return nullptr;
+                if (entry.key == key)
+                    return &entry.access;
+                slot = (slot + 1) & sparse_mask;
+            }
         }
-        void compact() {
+        void build_from(const std::unordered_map<std::uint64_t, PreparedAccessInfo>& words) {
             key_count = words.size();
             if (words.empty())
                 return;
@@ -92,14 +113,31 @@ class FormulaDecoder {
                 last = std::max(last, key);
             }
             const auto slots = ((last - first) >> 2) + 1;
-            if (slots > key_count * 2)
+            if (slots / 2 + slots % 2 <= key_count) {
+                if (slots > dense.max_size())
+                    throw Error("dense entity lookup size overflow", ErrorKind::Configuration);
+                dense_base = first;
+                dense.resize(static_cast<std::size_t>(slots));
+                for (const auto& [key, access] : words)
+                    dense[(key - first) >> 2] = access;
                 return;
-            dense_base = first;
-            dense.resize(slots);
-            for (const auto& [key, access] : words)
-                dense[(key - first) >> 2] = access;
-            words.clear();
-            words.rehash(0);
+            }
+            // Load factor <= 1/2 guarantees a vacant sentinel and bounded misses.
+            // All installed keys are 4-byte aligned, so UINT64_MAX is unavailable.
+            std::size_t capacity = 2;
+            while (capacity / 2 < key_count) {
+                if (capacity > sparse.max_size() / 2)
+                    throw Error("sparse entity lookup size overflow", ErrorKind::Configuration);
+                capacity *= 2;
+            }
+            sparse.resize(capacity);
+            sparse_mask = capacity - 1;
+            for (const auto& [key, access] : words) {
+                auto slot = hash_key(key, sparse_mask);
+                while (sparse[slot].key != UINT64_MAX)
+                    slot = (slot + 1) & sparse_mask;
+                sparse[slot] = {key, access};
+            }
         }
     };
     // Bound once per mount. These stable references account for hooks,
@@ -252,7 +290,9 @@ class FormulaDecoder {
                     throw Error("entity hash: size overflow", ErrorKind::Configuration);
                 count += std::size_t(spec.count) * (spec.occupied / 4);
             }
-            layout->words.reserve(count);
+            // Temporary deduplication map is discarded after freezing the layout.
+            std::unordered_map<std::uint64_t, PreparedAccessInfo> words;
+            words.reserve(count);
             for (std::uint32_t ordinal = 0; ordinal < view.mounts.size(); ++ordinal) {
                 const auto& m = mounts_[view.mounts[ordinal]];
                 const auto& arr = arrays_[m.array];
@@ -277,7 +317,7 @@ class FormulaDecoder {
                         access.linear = linear;
                         access.byte = byte;
                         access.available = arr.occupied - byte;
-                        const auto [it, inserted] = layout->words.try_emplace(key, access);
+                        const auto [it, inserted] = words.try_emplace(key, access);
                         if (!inserted) {
                             layout->has_priority_aliases = true;
                             const auto& previous = mounts_[view.mounts[it->second.ordinal]];
@@ -290,12 +330,9 @@ class FormulaDecoder {
                     }
                 }
             }
-            layout->compact();
+            layout->build_from(words);
             entity_hash_bytes_ += layout->dense.capacity() * sizeof(PreparedAccessInfo);
-            entity_hash_bytes_ +=
-                layout->words.size() *
-                    (sizeof(std::uint64_t) + sizeof(PreparedAccessInfo) + sizeof(void*) * 2) +
-                layout->words.bucket_count() * sizeof(void*);
+            entity_hash_bytes_ += layout->sparse.capacity() * sizeof(EntityHashLayout::SparseSlot);
             view.layout = std::move(layout);
             ++entity_layout_count_;
         }
@@ -633,10 +670,9 @@ void FormulaDecoder::for_each_word(F f) const {
                 if (layout.dense[i].ordinal != STATIC_NONE)
                     addresses.push_back(view.base + layout.dense_base + i * 4);
         } else {
-            for (const auto& [local, access] : layout.words) {
-                (void)access;
-                addresses.push_back(view.base + local);
-            }
+            for (const auto& slot : layout.sparse)
+                if (slot.key != UINT64_MAX)
+                    addresses.push_back(view.base + slot.key);
         }
     }
     std::sort(addresses.begin(), addresses.end());

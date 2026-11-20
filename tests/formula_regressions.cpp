@@ -247,6 +247,64 @@ void test_overlap() {
     CHECK(adjacent->b.Y.ref() == 0x123u);
 }
 
+// Keys with identical low address bits must remain sparse without allocating
+// their enormous holes. Exercise shared geometry, negative probes and full
+// 64-bit addresses, including the final valid word of the default map.
+struct FarSparseRegs : reg::RegEntityBundle {
+    REG_BUNDLE(FarSparseRegs);
+    REG(DATA, std::uint32_t, reg::at(0).array(reg::dims(128), reg::strides(1ULL << 40)));
+};
+struct FarSparseLayout : reg::Bundle {
+    REG_BUNDLE(FarSparseLayout);
+    REG_ENTITY(regs, FarSparseRegs);
+    static constexpr std::uint64_t span = 128ULL << 40;
+    static constexpr std::uint64_t first = 1ULL << 32;
+    static constexpr std::uint64_t last = (UINT64_MAX & ~std::uint64_t{3}) - span;
+    REG_LAYOUT([&] {
+        const auto v = reg::view("SPARSE", span).map(regs);
+        return reg::address_space("FAR_KEYS").map(v, first).map(v, last);
+    });
+};
+struct EndSparseRegs : reg::RegEntityBundle {
+    REG_BUNDLE(EndSparseRegs);
+    REG(LOW, std::uint32_t, reg::at(0));
+    REG(HIGH, std::uint32_t, reg::at(UINT64_MAX - 7));
+};
+struct EndSparseLayout : reg::Bundle {
+    REG_BUNDLE(EndSparseLayout);
+    REG_ENTITY(regs, EndSparseRegs);
+    REG_LAYOUT([&] {
+        return reg::address_space("END_KEYS")
+            .map(reg::view("ENTIRE", UINT64_MAX & ~std::uint64_t{3}).map(regs), 0);
+    });
+};
+void test_sparse_addresses() {
+    reg::RegisterBank<FarSparseLayout> bank(reg::space());
+    bank.finish();
+    for (unsigned round = 0; round < 2; ++round)
+        for (unsigned n = 0; n < 128; ++n) {
+            const auto i = (n * 37) % 128;
+            const auto local = std::uint64_t(i) << 40;
+            const auto value = round * 128 + i + 1;
+            CHECK(bank.map().mmio_write(FarSparseLayout::first + local, value).success());
+            CHECK(bank.map().mmio_read(FarSparseLayout::last + local) == value);
+            CHECK(bank->regs.DATA.at(i).ref() == value);
+            for (const auto base : {FarSparseLayout::first, FarSparseLayout::last})
+                CHECK(bank.map().try_mmio_read_sized(base + local + 4, 4).result ==
+                      reg::RegMemTxResult::DecodeError);
+        }
+    CHECK(bank.map().describe_layout(reg::LayoutDetail::Full).find("SPARSE") != std::string::npos);
+
+    reg::RegisterBank<EndSparseLayout> edge(reg::space());
+    edge.finish();
+    CHECK(edge.map().mmio_write(0, 17).success());
+    CHECK(edge.map().mmio_write(UINT64_MAX - 7, 29).success());
+    CHECK(edge.map().mmio_read(0) == 17 && edge.map().mmio_read(UINT64_MAX - 7) == 29);
+    for (const auto hole : std::array<std::uint64_t, 3>{4, 1ULL << 60, UINT64_MAX - 11})
+        CHECK(edge.map().try_mmio_read_sized(hole, 4).result == reg::RegMemTxResult::DecodeError);
+    CHECK(edge.map().describe_layout(reg::LayoutDetail::Full).find("HIGH") != std::string::npos);
+}
+
 void test_reserve_warning() {
     reg::RegisterBank<StaticReserveGap> a(reg::space(0x300).name("SR"));
     reg::RegisterBank<DynamicReserveGap> b(reg::space(0x300).name("DR"));
@@ -268,6 +326,7 @@ int main() {
         test_table_dedup();
         test_overlap();
         test_reserve_warning();
+        test_sparse_addresses();
         std::cout << "formula_regressions OK\n";
         return 0;
     } catch (const std::exception& e) {
