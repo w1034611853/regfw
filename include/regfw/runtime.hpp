@@ -190,74 +190,71 @@ REGFW_DETAIL_ALWAYS_INLINE inline void MappedAccessFrame::fill(RegAccessInfo& i,
     }
 }
 
-// One compiled owner for every event callable. Small captures are built
-// directly in aligned inline storage; only invocation depends on F.
-class EventCallback final {
-  public:
-    using Invoke = void (*)(void*, const void*, const RegAccessInfo&);
-    using Destroy = void (*)(void*) noexcept;
-    using FrameInvoke = void (*)(void*, RegData, const ScalarAccessFrame&);
-
-  private:
+// All entry points of a callback share one captured object.
+class CallbackStorage {
     static constexpr std::size_t INLINE_BYTES = 2 * sizeof(void*);
     alignas(std::max_align_t) std::byte inline_storage_[INLINE_BYTES];
-    void* target_{};
-    std::size_t alignment_{};
-    Invoke invoke_{};
-    FrameInvoke frame_invoke_{};
-    Destroy destroy_{};
-    bool constructed_{};
+    void* target_;
+    std::size_t alignment_;
+    void (*destroy_)(void*) noexcept {};
 
-  public:
-    EventCallback(std::size_t bytes,
-                  std::size_t alignment,
-                  Invoke invoke,
-                  Destroy destroy,
-                  FrameInvoke frame = nullptr);
-    ~EventCallback();
-    EventCallback(const EventCallback&) = delete;
-    EventCallback& operator=(const EventCallback&) = delete;
-    void* target_memory() noexcept {
+  protected:
+    CallbackStorage(std::size_t bytes, std::size_t alignment);
+    ~CallbackStorage();
+    void* target() const noexcept {
         return target_;
     }
-    void mark_constructed() noexcept {
-        constructed_ = true;
+
+  public:
+    CallbackStorage(const CallbackStorage&) = delete;
+    CallbackStorage& operator=(const CallbackStorage&) = delete;
+    template <class F>
+    void construct(F&& f) {
+        using Callable = std::remove_cvref_t<F>;
+        target_ = ::new (target_) Callable(std::forward<F>(f));
+        if constexpr (!std::is_trivially_destructible_v<Callable>)
+            destroy_ = [](void* p) noexcept {
+                static_cast<Callable*>(p)->~Callable();
+            };
+    }
+};
+
+template <class Callback, class F, class... Entry>
+std::shared_ptr<const Callback> bind_callback(F&& f, Entry... entry) {
+    using Callable = std::remove_cvref_t<F>;
+    auto callback = std::make_shared<Callback>(sizeof(Callable), alignof(Callable), (+entry)...);
+    callback->construct(std::forward<F>(f));
+    return callback;
+}
+
+class EventCallback final : public CallbackStorage {
+  public:
+    using Invoke = void (*)(void*, const void*, const RegAccessInfo&);
+    using FrameInvoke = void (*)(void*, RegData, const ScalarAccessFrame&);
+
+    EventCallback(std::size_t bytes, std::size_t alignment, Invoke invoke, FrameInvoke frame)
+        : CallbackStorage(bytes, alignment), invoke_(invoke), frame_invoke_(frame) {
     }
     void from_frame(RegData value, const ScalarAccessFrame& frame) const {
         if (frame_invoke_) {
-            frame_invoke_(target_, value, frame);
+            frame_invoke_(target(), value, frame);
             return;
         }
         RegAccessInfo i;
         frame.fill(i);
-        invoke_(target_, &value, i);
+        invoke_(target(), &value, i);
     }
     void operator()(RegData value, const RegAccessInfo& info) const {
-        invoke_(target_, &value, info);
+        invoke_(target(), &value, info);
     }
     void operator()(const WideRegData& value, const RegAccessInfo& info) const {
-        invoke_(target_, &value, info);
+        invoke_(target(), &value, info);
     }
+
+  private:
+    Invoke invoke_;
+    FrameInvoke frame_invoke_;
 };
-std::shared_ptr<EventCallback> allocate_event(std::size_t bytes,
-                                              std::size_t alignment,
-                                              EventCallback::Invoke invoke,
-                                              EventCallback::Destroy destroy,
-                                              EventCallback::FrameInvoke frame = nullptr);
-template <class F>
-std::shared_ptr<const EventCallback>
-bind_event(F&& f, EventCallback::Invoke invoke, EventCallback::FrameInvoke frame = nullptr) {
-    using Callable = std::remove_cvref_t<F>;
-    EventCallback::Destroy destroy = nullptr;
-    if constexpr (!std::is_trivially_destructible_v<Callable>)
-        destroy = [](void* p) noexcept {
-            static_cast<Callable*>(p)->~Callable();
-        };
-    auto event = allocate_event(sizeof(Callable), alignof(Callable), invoke, destroy, frame);
-    ::new (event->target_memory()) Callable(std::forward<F>(f));
-    event->mark_constructed();
-    return event;
-}
 // Inspect only a non-generic callable's exact signature. Probing a generic
 // lambda with raw info can make its typed index.get() body ill-formed.
 template <class Signature>
@@ -314,13 +311,14 @@ std::shared_ptr<const EventCallback> bind_pre_access(F f) {
         // throws and follows the normal hook-failure path.
         return bind_pre_access(std::function<void(const RegAccessInfo&)>(std::move(f)));
     } else {
-        return bind_event(std::move(f),
-                          invoke_common_event<F>,
-                          [](void* target, RegData, const ScalarAccessFrame& frame) {
-                              frame.with_info([&](const RegAccessInfo& info) {
-                                  std::invoke(*static_cast<F*>(target), info);
-                              });
-                          });
+        return bind_callback<EventCallback>(
+            std::move(f),
+            invoke_common_event<F>,
+            [](void* target, RegData, const ScalarAccessFrame& frame) {
+                frame.with_info([&](const RegAccessInfo& info) {
+                    std::invoke(*static_cast<F*>(target), info);
+                });
+            });
     }
 }
 template <class Info, class F>
@@ -362,25 +360,21 @@ void invoke_frame_event(void* target, RegData value, const ScalarAccessFrame& fr
     }
 }
 
-class ScalarReadSource {
-    using Full = std::function<RegData(RegData, const RegAccessInfo&)>;
-    using Frame = std::function<RegData(RegData, const ScalarAccessFrame&)>;
+class ScalarReadSource final : public CallbackStorage {
+    using Full = RegData (*)(void*, RegData, const RegAccessInfo&);
+    using Frame = RegData (*)(void*, RegData, const ScalarAccessFrame&);
     Full full_;
     Frame frame_;
 
   public:
-    ScalarReadSource(Full full, Frame frame = {})
-        : full_(std::move(full)), frame_(std::move(frame)) {
+    ScalarReadSource(std::size_t bytes, std::size_t alignment, Full full, Frame frame)
+        : CallbackStorage(bytes, alignment), full_(full), frame_(frame) {
     }
     RegData operator()(RegData value, const RegAccessInfo& info) const {
-        return full_(value, info);
+        return full_(target(), value, info);
     }
     RegData from_frame(RegData value, const ScalarAccessFrame& frame) const {
-        if (frame_)
-            return frame_(value, frame);
-        RegAccessInfo i;
-        frame.fill(i);
-        return full_(value, i);
+        return frame_(target(), value, frame);
     }
 };
 using WideReadSource = std::function<WideRegData(WideRegData, const RegAccessInfo&)>;
@@ -523,19 +517,20 @@ class RegView final
                     return source_call<false>(f, value, info);
                 });
         } else {
-            auto callable = std::make_shared<F>(std::move(f));
-            return std::make_shared<const detail::ScalarReadSource>(
-                [callable](RegData value, const RegAccessInfo& info) {
-                    return source_call<false>(*callable, value, info);
+            return detail::bind_callback<detail::ScalarReadSource>(
+                std::move(f),
+                [](void* target, RegData value, const RegAccessInfo& info) {
+                    return source_call<false>(*static_cast<F*>(target), value, info);
                 },
-                [callable](RegData value, const detail::ScalarAccessFrame& frame) {
+                [](void* target, RegData value, const detail::ScalarAccessFrame& frame) {
+                    auto& callable = *static_cast<F*>(target);
                     if constexpr (!detail::CommonInfoCallable<F>::value &&
                                   !std::is_invocable_v<F&, T, const InfoType&> &&
                                   !std::is_invocable_v<F&, const InfoType&>) {
-                        return read_result(value, *callable);
+                        return read_result(value, callable);
                     } else {
                         return frame.with_info([&](const RegAccessInfo& i) {
-                            return source_call<true>(*callable, value, i);
+                            return source_call<true>(callable, value, i);
                         });
                     }
                 });
@@ -546,17 +541,18 @@ class RegView final
         detail::EventCallback::FrameInvoke frame = nullptr;
         if constexpr (!detail::wide_value_v<T>)
             frame = &detail::invoke_frame_event<T, InfoType, F>;
+        detail::EventCallback::Invoke invoke;
         if constexpr (detail::CommonInfoCallable<F>::value)
-            return detail::bind_event(std::move(f), &detail::invoke_common_event<F>, frame);
+            invoke = &detail::invoke_common_event<F>;
         else if constexpr (std::is_invocable_v<F&, T, const InfoType&>)
-            return detail::bind_event(
-                std::move(f), &detail::invoke_value_event<T, InfoType, F>, frame);
+            invoke = &detail::invoke_value_event<T, InfoType, F>;
         else if constexpr (std::is_invocable_v<F&, const InfoType&>)
-            return detail::bind_event(std::move(f), &detail::invoke_info_event<InfoType, F>, frame);
+            invoke = &detail::invoke_info_event<InfoType, F>;
         else if constexpr (std::is_invocable_v<F&>)
-            return detail::bind_event(std::move(f), &detail::invoke_empty_event<F>, frame);
+            invoke = &detail::invoke_empty_event<F>;
         else
             static_assert(sizeof(F) == 0, "callback must accept (value,info), (info), or ()");
+        return detail::bind_callback<detail::EventCallback>(std::move(f), invoke, frame);
     }
 
   public:
