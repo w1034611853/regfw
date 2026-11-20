@@ -689,11 +689,11 @@ std::string RegisterMap::describe_layout(LayoutDetail detail) const {
     auto role = [&](std::uint64_t base, std::uint64_t size) {
         const bool storage = std::any_of(nodes_.begin(), nodes_.end(), [&](const auto& node) {
             const auto& l = node->layout();
-            for (std::size_t i = 0; i < l.elements.size(); ++i)
+            for (std::size_t i = 0; i < l.indices.size(); ++i)
                 if (l.element_mapped[i] &&
                     detail::overlaps(base,
                                      size,
-                                     l.elements[i].address,
+                                     l.mapped_addresses[i],
                                      std::max((node->value_size + 3u) & ~3u, 4u)))
                     return true;
             return false;
@@ -779,13 +779,13 @@ std::string RegisterMap::describe_layout(LayoutDetail detail) const {
     for (const auto& node : nodes_) {
         if (!full)
             continue;
-        if (node->layout().elements.empty() || !node->layout().mapped)
+        if (node->layout().indices.empty() || !node->layout().mapped)
             continue;
         std::uint64_t low = UINT64_MAX, high = 0;
         std::size_t mapped_count = 0;
-        for (std::size_t i = 0; i < node->layout().elements.size(); ++i)
+        for (std::size_t i = 0; i < node->layout().indices.size(); ++i)
             if (node->layout().element_mapped[i]) {
-                const auto a = node->layout().elements[i].address;
+                const auto a = node->layout().mapped_addresses[i];
                 low = std::min(low, std::uint64_t(a));
                 high = std::max(high, std::uint64_t(a));
                 ++mapped_count;
@@ -802,7 +802,7 @@ std::string RegisterMap::describe_layout(LayoutDetail detail) const {
         if (node->declared_array)
             details += "; dims=" + list(node->dims) +
                        "; stride=" + list(node->layout().strides, true) +
-                       "; count=" + std::to_string(node->layout().elements.size());
+                       "; count=" + std::to_string(node->layout().indices.size());
         if (mapped_count < node->element_count())
             details += "; mapped=" + std::to_string(mapped_count) + "/" +
                        std::to_string(node->element_count());
@@ -1067,11 +1067,11 @@ std::string RegisterMap::describe_layout(LayoutDetail detail) const {
             }
         const bool decoded = std::any_of(nodes_.begin(), nodes_.end(), [&](const auto& node) {
             const auto& l = node->layout();
-            for (std::size_t i = 0; i < l.elements.size(); ++i)
+            for (std::size_t i = 0; i < l.indices.size(); ++i)
                 if (l.element_mapped[i] &&
                     detail::overlaps(base,
                                      size,
-                                     l.elements[i].address,
+                                     l.mapped_addresses[i],
                                      std::max((node->value_size + 3u) & ~3u, 4u)))
                     return true;
             return false;

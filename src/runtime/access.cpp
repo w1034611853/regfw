@@ -398,7 +398,7 @@ RegisterMap::Resolution& RegisterMap::resolve_plan(std::uint64_t address,
     i.size = static_cast<std::uint8_t>(size);
     i.internal_byte_offset = static_cast<std::uint8_t>(e.byte_offset);
     const auto& coordinates =
-        e.precomputed_index ? *e.precomputed_index : e.view->elements[e.linear].index;
+        e.precomputed_index ? *e.precomputed_index : e.view->indices[e.linear];
     detail::copy_index(i.request_index, coordinates);
     detail::copy_index(i.index, i.request_index);
     i.raw_data = kind == RegTransactionKind::Write ? value & detail::low_mask(size * 8) : 0;
@@ -494,7 +494,7 @@ void RegisterMap::derive(Resolution& r) {
         for (std::size_t d = 0; d < n.dims.size(); ++d)
             linear = linear * n.dims[d] + coords[d];
         r.entry.linear = static_cast<std::uint32_t>(linear);
-        detail::copy_index(i.index, r.entry.view->elements[linear].index);
+        detail::copy_index(i.index, r.entry.view->indices[linear]);
         // Match Rust: access-group remap changes element/index; resolved_address
         // remains the bus/alias/identity address (not a re-encoded element address).
         i.stored_before = i.stored_after = n.read_scalar(linear);
@@ -581,7 +581,7 @@ void RegisterMap::access_log(const Resolution& r,
         return;
     emit_log({level,
               r.info.is_read() ? "Read" : "Write",
-              r.entry.view->elements[r.entry.linear].name,
+              r.entry.view->names[r.entry.linear],
               &r.info,
               value,
               action,
@@ -909,7 +909,7 @@ RegisterMap::fast_scalar(std::uint64_t address,
                                     writing ? after : stored,
                                     writing ? RegTransactionKind::Write : RegTransactionKind::Read,
                                     nullptr,
-                                    &layout->elements[linear].index,
+                                    &layout->indices[linear],
                                     target};
     if (writing) {
         std::memcpy(p, &after, 4);
@@ -931,7 +931,7 @@ RegisterMap::fast_scalar(std::uint64_t address,
             source_ok = false;
         }
     if (const auto level = access_log_level(n); level != HLOG_LEVEL_OFF)
-        log_frame(level, "Read", n.layout().elements[linear].name, frame, returned);
+        log_frame(level, "Read", n.layout().names[linear], frame, returned);
     if (source_ok)
         if (auto* fn = n.read_complete_callback.get())
             try {
@@ -1013,7 +1013,7 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
     if (!plan && allowed && unobserved && access_log_level(n) == HLOG_LEVEL_OFF)
         return plain(linear, logical_before);
 
-    const auto& coordinate = bound.node_layout->elements[linear].index;
+    const auto& coordinate = bound.node_layout->indices[linear];
     const auto logical = plan ? coordinate.values[plan->dimension] : 0;
     detail::MappedAccessFrame mapped;
     detail::ScalarAccessFrame frame{&bound,
@@ -1113,7 +1113,7 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
         if (const auto level = access_log_level(n); level != HLOG_LEVEL_OFF)
             log_frame(level,
                       writing ? "Write" : "Read",
-                      bound.node_layout->elements[linear].name,
+                      bound.node_layout->names[linear],
                       frame,
                       returned);
     };

@@ -352,10 +352,25 @@ struct SliceLayout : reg::Bundle {
 };
 void register_slices_and_split_visibility() {
     reg::RegisterBank<SliceLayout> bank(reg::space());
+    std::array<reg::RegAccessInfo, 2> writes;
+    unsigned calls = 0;
+    bank->core.VALUES.on_write([&](const reg::RegAccessInfo& info) {
+        writes.at(calls++) = info;
+    });
     bank.finish();
     auto& map = bank.map();
+    const auto slice = bank->core.VALUES.subspan(1, 2);
+    CHECK(slice.address() == B + 0x20 && slice.address_span_bytes() == 12);
+    CHECK(slice.at(0).diagnostic_name().ends_with("VALUES[1]") &&
+          slice.at(1).diagnostic_name().ends_with("VALUES[2]"));
     CHECK(map.mmio_write(B + 0x20, 42).success() && bank->core.VALUES.at(1).ref() == 42);
     CHECK(map.mmio_write(B + 0x28, 43).success() && bank->core.VALUES.at(2).ref() == 43);
+    CHECK(calls == 2 && writes[0].index.linear() == 1 && writes[1].index.linear() == 2);
+    CHECK(writes[0].index.values[0] == 1 && writes[0].address == B + 0x20 &&
+          writes[1].index.values[0] == 2 && writes[1].address == B + 0x28);
+    CHECK(bank->core.VALUES.at_element(reg::TypedRegElementIndex<1>(writes[0].index)).address() ==
+              B + 0x20 &&
+          bank->core.VALUES.at_element(reg::TypedRegElementIndex<1>(writes[1].index)).ref() == 43);
     CHECK(map.mmio_read(B + 0x40) == 0x55667788 && map.mmio_read(B + 0x44) == 7);
     CHECK(!map.try_mmio_read_sized(B + 0x40, 8).success()); // Cannot span two selected entities.
     CHECK(map.layout_warnings().size() == 1);

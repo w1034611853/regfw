@@ -168,7 +168,9 @@ RegisterMap::install_node(std::uint64_t address,
     const auto count = n->values->size();
     if (!n->transaction_policy.independent())
         n->transaction_state.resize(count);
-    primary->elements.reserve(count);
+    primary->indices.reserve(count);
+    primary->mapped_addresses.reserve(count);
+    primary->names.reserve(count);
     primary->local_addresses.reserve(count);
     std::vector<std::pair<std::uint64_t, std::size_t>> occupied_ranges;
     if (count > 1)
@@ -226,7 +228,9 @@ RegisterMap::install_node(std::uint64_t address,
                      {n.get(), static_cast<std::uint32_t>(k), byte, n->instance, primary.get()}});
             }
         primary->local_addresses.push_back(a);
-        primary->elements.push_back({a, idx, std::move(full)});
+        primary->indices.push_back(idx);
+        primary->mapped_addresses.push_back(a);
+        primary->names.push_back(std::move(full));
     }
     // Validate whole element intervals, rather than allocating a hash
     // entry (and copying a name) for every occupied 32-bit word.
@@ -238,15 +242,14 @@ RegisterMap::install_node(std::uint64_t address,
         const auto [before, bi] = occupied_ranges[k - 1];
         const auto [after, ai] = occupied_ranges[k];
         if (detail::overlaps(before, occupied, after, occupied))
-            throw Error(
-                "register array elements overlap:\n  " +
-                    detail::declaration(
-                        primary->elements[bi].name, before, occupied, n->declaration_location) +
-                    "\n  " +
-                    detail::declaration(
-                        primary->elements[ai].name, after, occupied, n->declaration_location),
-                ErrorKind::Configuration,
-                n->declaration_location);
+            throw Error("register array elements overlap:\n  " +
+                            detail::declaration(
+                                primary->names[bi], before, occupied, n->declaration_location) +
+                            "\n  " +
+                            detail::declaration(
+                                primary->names[ai], after, occupied, n->declaration_location),
+                        ErrorKind::Configuration,
+                        n->declaration_location);
     }
     auto* ptr = n.get();
     auto entity = std::unique_ptr<RegEntity>(new RegEntity(std::move(n)));
@@ -409,8 +412,8 @@ void RegisterMap::finalize() {
         return;
     aliases_.clear();
     for (auto& n : nodes_)
-        if (!n->instance && !n->layout().elements.empty())
-            n->instance = source_instance(n->layout().elements[0].address);
+        if (!n->instance && !n->layout().indices.empty())
+            n->instance = source_instance(n->layout().mapped_addresses[0]);
     auto cache = [&](std::uint64_t a) {
         auto alias = walk_alias(a, 4);
         if (alias.defined && lookup_.get(alias.target) && !aliases_.get(a))
@@ -463,7 +466,8 @@ void RegisterMap::validate_integrity() const {
                 throw Error("invalid node dimensions");
             count *= d;
         }
-        if (count != n->element_count() || count != n->layout().elements.size() ||
+        if (count != n->element_count() || count != n->layout().indices.size() ||
+            count != n->layout().mapped_addresses.size() || count != n->layout().names.size() ||
             n->transaction_state.size() != (n->transaction_policy.independent() ? 0 : count))
             throw Error("invalid node storage length");
     }

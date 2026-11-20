@@ -166,7 +166,7 @@ std::string RegisterMap::explain_address(std::uint64_t address,
         }
         const auto& n = *entry->node;
         const auto offset = entry->byte_offset + unsigned(alias.target & 3);
-        out << "  -> REGISTER " << entry->view->elements[entry->linear].name
+        out << "  -> REGISTER " << entry->view->names[entry->linear]
             << " width=" << n.value_size * 8 << " bits byte_offset=" << offset << '\n'
             << "     entity=" << n.name << " request_element=" << entry->linear << " at "
             << n.declaration_location.file_name() << ':' << n.declaration_location.line() << '\n';

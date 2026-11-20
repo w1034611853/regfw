@@ -175,7 +175,7 @@ FieldBehavior mixed(std::vector<Rule> rules) {
 namespace reg::detail {
 RegisterMetadata node_metadata(const EntityState& n) {
     return {n.name,
-            n.layout().elements.front().address,
+            n.layout().mapped_addresses.front(),
             n.value_size * 8,
             n.reset_value,
             n.writable_mask,

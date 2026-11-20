@@ -259,7 +259,7 @@ class FormulaDecoder {
                         const auto key = m.base - view.base + off + byte;
                         const auto& binding = bindings_[m.binding];
                         const auto actual_linear = std::size_t(binding.linear) + linear;
-                        if (actual_linear >= binding.node->layout().elements.size())
+                        if (actual_linear >= binding.node->layout().indices.size())
                             throw Error("prepared access: invalid array element",
                                         ErrorKind::Configuration);
                         PreparedAccessInfo access{};

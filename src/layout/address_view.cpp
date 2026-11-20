@@ -128,10 +128,9 @@ class ViewCompiler {
         auto [it, inserted] = canonical_.try_emplace(node);
         if (inserted) {
             const auto& primary = node->layout();
-            for (const auto& e : primary.elements)
-                it->second.addresses.push_back(e.address);
+            it->second.addresses = primary.mapped_addresses;
             it->second.mapped = primary.element_mapped;
-            it->second.owners.assign(primary.elements.size(), none);
+            it->second.owners.assign(primary.indices.size(), none);
         }
         return it->second;
     }
@@ -683,16 +682,15 @@ class ViewCompiler {
             for (std::size_t k = 0; k < c.owners.size(); ++k)
                 if (c.owners[k] != none) {
                     const auto& f = flat_[c.owners[k]];
-                    layout.elements[k].address = c.addresses[k];
+                    layout.mapped_addresses[k] = c.addresses[k];
                     layout.layout_scope = f.scope;
-                    layout.elements[k].name =
-                        f.name + "." +
-                        node->name.substr(node->name.rfind('.') == std::string::npos
-                                              ? 0
-                                              : node->name.rfind('.') + 1);
+                    layout.names[k] = f.name + "." +
+                                      node->name.substr(node->name.rfind('.') == std::string::npos
+                                                            ? 0
+                                                            : node->name.rfind('.') + 1);
                     if (node->element_count() > 1)
-                        for (auto coord : layout.elements[k].index.coordinates())
-                            layout.elements[k].name += '[' + std::to_string(coord) + ']';
+                        for (auto coord : layout.indices[k].coordinates())
+                            layout.names[k] += '[' + std::to_string(coord) + ']';
                     layout.display_name = f.name;
                 }
             layout.element_mapped = std::move(c.mapped);

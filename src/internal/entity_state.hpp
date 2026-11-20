@@ -72,12 +72,11 @@ struct RegViewLayout {
     EntityState* entity{};
     std::size_t layout_scope = ~std::size_t{};
     std::vector<std::uint64_t> strides;
-    struct Element {
-        std::uint64_t address;
-        RegElementIndex index;
-        std::string name;
-    };
-    std::vector<Element> elements;
+    // Coordinates remain stable after installation; canonical mapping only
+    // updates the separate addresses and diagnostic names.
+    std::vector<RegElementIndex> indices;
+    std::vector<std::uint64_t> mapped_addresses;
+    std::vector<std::string> names;
     std::vector<std::uint64_t> local_addresses;
     std::vector<bool> element_mapped;
     std::string display_name;

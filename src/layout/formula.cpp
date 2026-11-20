@@ -488,13 +488,14 @@ class FormulaInstaller {
             const auto prefix =
                 *names[b.scope] + '.' +
                 n.name.substr(n.name.rfind('.') == std::string::npos ? 0 : n.name.rfind('.') + 1);
-            for (std::size_t k = 0; k < l.elements.size(); ++k) {
-                auto& e = l.elements[k];
-                e.address = b.canonical_base + l.local_addresses[k] - l.local_addresses.front();
-                e.name = prefix;
+            for (std::size_t k = 0; k < l.indices.size(); ++k) {
+                l.mapped_addresses[k] =
+                    b.canonical_base + l.local_addresses[k] - l.local_addresses.front();
+                auto& name = l.names[k];
+                name = prefix;
                 if (n.element_count() > 1)
-                    for (auto coord : e.index.coordinates())
-                        e.name += '[' + std::to_string(coord) + ']';
+                    for (auto coord : l.indices[k].coordinates())
+                        name += '[' + std::to_string(coord) + ']';
             }
             l.element_mapped.assign(n.element_count(), true);
             l.mapped = true;

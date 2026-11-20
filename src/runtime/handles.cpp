@@ -29,7 +29,7 @@ void HandleState::element_out_of_range() {
 std::size_t HandleState::checked_element(RegElementIndex index) const {
     check();
     if (index.linear() < index_ || index.linear() - index_ >= count_ ||
-        node_->layout().elements[index.linear()].index != index)
+        node_->layout().indices[index.linear()] != index)
         throw Error("element does not match register shape", ErrorKind::Access);
     return index.linear();
 }
@@ -76,24 +76,24 @@ std::uint64_t HandleState::address() const {
         throw Error("empty register view has no address", ErrorKind::Access);
     if (!node_->layout().element_mapped.at(index_))
         throw Error("RegEntity element has no address mapping", ErrorKind::Access);
-    return node_->layout().elements[index_].address;
+    return node_->layout().mapped_addresses[index_];
 }
 std::uint64_t HandleState::address_span_bytes() const {
     check();
     if (!count_)
         return 0;
-    const auto& elements = node_->layout().elements;
+    const auto& addresses = node_->layout().mapped_addresses;
     for (std::size_t i = index_; i < index_ + count_; ++i)
         if (!node_->layout().element_mapped.at(i))
             throw Error("RegEntity element has no address mapping", ErrorKind::Access);
-    if (elements[index_ + count_ - 1].address < elements[index_].address)
+    if (addresses[index_ + count_ - 1] < addresses[index_])
         throw Error("RegView address mapping is not monotonic", ErrorKind::Access);
-    return std::uint64_t(elements[index_ + count_ - 1].address) - elements[index_].address +
+    return std::uint64_t(addresses[index_ + count_ - 1]) - addresses[index_] +
            std::max((node_->value_size + 3u) & ~3u, 4u);
 }
 std::string HandleState::diagnostic_name() const {
     check();
-    return count_ ? node_->layout().elements[index_].name : node_->name + "[empty]";
+    return count_ ? node_->layout().names[index_] : node_->name + "[empty]";
 }
 RegisterMetadata HandleState::metadata() const {
     auto n = checked_node();
