@@ -164,6 +164,7 @@ class FormulaDecoder {
         std::vector<PreparedMountContext> prepared;
         std::shared_ptr<const EntityHashLayout> layout;
         std::vector<const EntityView*> identity_targets;
+        std::size_t reserve_begin{}, reserve_count{};
     };
 
   public:
@@ -186,7 +187,6 @@ class FormulaDecoder {
     // Reserve slices contain indices into the immutable global reserve list.
     struct ViewMeta {
         std::uint64_t end{}, prefix_max_end{};
-        std::size_t reserve_begin{}, reserve_count{};
         bool isolated{};
     };
     std::vector<std::uint64_t> view_bases_;
@@ -406,18 +406,18 @@ class FormulaDecoder {
         view_bases_.reserve(entity_views_.size());
         view_metas_.reserve(entity_views_.size());
         std::uint64_t max_end = 0;
-        for (const auto& view : entity_views_) {
+        for (auto& view : entity_views_) {
             max_end = std::max(max_end, view.end);
             view_bases_.push_back(view.base);
-            ViewMeta meta{view.end, max_end, view_reserve_indices_.size()};
+            view_metas_.push_back({view.end, max_end});
+            view.reserve_begin = view_reserve_indices_.size();
             for (std::size_t r = 0; r < reserves_.size(); ++r) {
                 if (reserves_[r].base >= view.end)
                     break;
                 if (reserves_[r].end > view.base)
                     view_reserve_indices_.push_back(r);
             }
-            meta.reserve_count = view_reserve_indices_.size() - meta.reserve_begin;
-            view_metas_.push_back(meta);
+            view.reserve_count = view_reserve_indices_.size() - view.reserve_begin;
         }
         for (std::size_t i = 0; i < entity_views_.size(); ++i)
             view_metas_[i].isolated =
@@ -464,7 +464,7 @@ class FormulaDecoder {
                 const auto& candidate = entity_views_[index];
                 const auto& meta = view_metas_[index];
                 if (meta.end - base != span || candidate.layout != view.layout || !meta.isolated ||
-                    meta.reserve_count)
+                    candidate.reserve_count)
                     continue;
                 if (view.identity_targets.empty())
                     view.identity_targets.resize(window.count);
@@ -534,9 +534,9 @@ class FormulaDecoder {
         if (!lookup_prepared(word, hit))
             return false;
         // Only reserves intersecting the winning View can mask its occupied REG.
-        const auto& meta = view_metas_[static_cast<std::size_t>(hit.view - entity_views_.data())];
-        const auto end = meta.reserve_begin + meta.reserve_count;
-        for (auto i = meta.reserve_begin; i < end; ++i) {
+        const auto& view = *hit.view;
+        const auto end = view.reserve_begin + view.reserve_count;
+        for (auto i = view.reserve_begin; i < end; ++i) {
             const auto& r = reserves_[view_reserve_indices_[i]];
             if (word < r.base)
                 break;
