@@ -825,22 +825,35 @@ struct PreAccessSlot {
     bool deferred{}, required{};
 };
 struct AccessResolverSlot {
-    struct Function {
-        using Full = std::function<RegData(const RegAccessInfo&)>;
-        using Frame = std::function<RegData(const ScalarAccessFrame&)>;
-        using Coordinates = std::function<RegData(std::uint32_t, RegData)>;
-        Full full;
-        Frame frame;
-        Coordinates coordinates;
-        Function(Full f, Frame p) : full(std::move(f)), frame(std::move(p)) {
+    class Function final : public CallbackStorage {
+        using Full = RegData (*)(void*, const RegAccessInfo&);
+        using Frame = RegData (*)(void*, const ScalarAccessFrame&);
+        using Coordinates = RegData (*)(void*, std::uint32_t, RegData);
+        Full full_{};
+        Frame frame_{};
+        Coordinates coordinates_{};
+
+      public:
+        Function(std::size_t bytes, std::size_t alignment, Full full, Frame frame)
+            : CallbackStorage(bytes, alignment), full_(full), frame_(frame) {
         }
-        explicit Function(Coordinates c) : coordinates(std::move(c)) {
+        Function(std::size_t bytes, std::size_t alignment, Coordinates coordinates)
+            : CallbackStorage(bytes, alignment), coordinates_(coordinates) {
+        }
+        bool coordinate_only() const noexcept {
+            return coordinates_ != nullptr;
+        }
+        RegData from_coordinates(std::uint32_t vf, RegData logical) const {
+            return coordinates_(target(), vf, logical);
+        }
+        RegData from_frame(const ScalarAccessFrame& frame) const {
+            return frame_(target(), frame);
         }
         RegData operator()(const RegAccessInfo& i, RegData logical) const {
-            if (full)
-                return full(i);
-            return coordinates(i.resolved_identity.value_or(i.source_instance.value_or(0)),
-                               logical);
+            if (full_)
+                return full_(target(), i);
+            return from_coordinates(i.resolved_identity.value_or(i.source_instance.value_or(0)),
+                                    logical);
         }
     };
     std::string name;
@@ -1255,25 +1268,29 @@ class RegisterMap {
                              std::string_view name,
                              F f,
                              std::source_location at = std::source_location::current()) {
-        auto callable = std::make_shared<F>(std::move(f));
         using Function = detail::AccessResolverSlot::Function;
         std::shared_ptr<const Function> callback;
         if constexpr (std::is_invocable_v<F&, const RegAccessInfo&>) {
-            callback = std::make_shared<Function>(
-                [callable](const RegAccessInfo& info) {
-                    return detail::checked_access_result<V>(std::invoke(*callable, info));
+            callback = detail::bind_callback<Function>(
+                std::move(f),
+                [](void* target, const RegAccessInfo& info) {
+                    return detail::checked_access_result<V>(
+                        std::invoke(*static_cast<F*>(target), info));
                 },
-                [callable](const detail::ScalarAccessFrame& frame) {
+                [](void* target, const detail::ScalarAccessFrame& frame) {
                     return frame.with_mapped_info([&](const RegAccessInfo& i) {
-                        return detail::checked_access_result<V>(std::invoke(*callable, i));
+                        return detail::checked_access_result<V>(
+                            std::invoke(*static_cast<F*>(target), i));
                     });
                 });
         } else {
             static_assert(std::is_invocable_v<F&, std::uint32_t, RegData>,
                           "index resolver must accept RegAccessInfo or (vf, logical)");
-            callback = std::make_shared<Function>([callable](std::uint32_t vf, RegData logical) {
-                return detail::checked_access_result<V>(std::invoke(*callable, vf, logical));
-            });
+            callback = detail::bind_callback<Function>(
+                std::move(f), [](void* target, std::uint32_t vf, RegData logical) {
+                    return detail::checked_access_result<V>(
+                        std::invoke(*static_cast<F*>(target), vf, logical));
+                });
         }
         bind_access_resolver(
             key.id(), key.name, std::move(callback), detail::callback_description<F>(name, at));

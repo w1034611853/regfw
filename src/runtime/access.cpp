@@ -1044,7 +1044,7 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
                                     &mapped};
     // A rich resolver, register hook or denied access always needs this
     // frame. Only the unobserved coordinate-only case defers assembly.
-    const bool deferred = unobserved && allowed && resolver && resolver->coordinates;
+    const bool deferred = unobserved && allowed && resolver && resolver->coordinate_only();
     auto populate = [&] {
         mapped.source_address = source_address;
         mapped.target_address = target_address;
@@ -1093,12 +1093,12 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
             if (!resolver)
                 throw RegAccessDeriveError::device_error("access resolver is not bound: " +
                                                          plan->resolver->name);
-            if (resolver->coordinates) {
+            if (resolver->coordinate_only()) {
                 const auto id = identity ? identity->resolved_id
                                          : instance.value_or(bound.instance.value_or(0));
-                mapped.mapped = resolver->coordinates(id, logical);
+                mapped.mapped = resolver->from_coordinates(id, logical);
             } else {
-                mapped.mapped = resolver->frame(frame);
+                mapped.mapped = resolver->from_frame(frame);
             }
             mapped.has_mapped = true;
             if (mapped.mapped >= plan->extent)
