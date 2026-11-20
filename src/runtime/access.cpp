@@ -885,7 +885,7 @@ RegisterMap::fast_scalar(std::uint64_t address,
                          Node& n,
                          std::uint32_t linear,
                          const detail::ScalarAccessSite& site,
-                         const RegElementIndex& index,
+                         const detail::RegViewLayout* layout,
                          std::uint64_t target) {
     constexpr bool writing = Writing;
     if (access_log_level(n) != HLOG_LEVEL_OFF)
@@ -909,7 +909,7 @@ RegisterMap::fast_scalar(std::uint64_t address,
                                     writing ? after : stored,
                                     writing ? RegTransactionKind::Write : RegTransactionKind::Read,
                                     nullptr,
-                                    &index,
+                                    &layout->elements[linear].index,
                                     target};
     if (writing) {
         std::memcpy(p, &after, 4);
@@ -982,7 +982,6 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
         }
     }
     const auto& bound = *target.context;
-    const auto& coordinate = target.access->index;
     auto linear = bound.binding->linear + target.access->linear;
     auto& n = *bound.node;
     auto data_at = [&](std::uint32_t index) {
@@ -995,7 +994,6 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
     };
     const auto* plan = n.single_index.get();
     const auto* resolver = plan ? plan->resolver->callback.get() : nullptr;
-    const auto logical = plan ? coordinate.values[plan->dimension] : 0;
     const bool allowed = writing ? policy.allow_write : policy.allow_read;
     const bool hooks = pre_access_ || bound.pre_access_chain;
     const bool callbacks =
@@ -1015,6 +1013,8 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
     if (!plan && allowed && unobserved && access_log_level(n) == HLOG_LEVEL_OFF)
         return plain(linear, logical_before);
 
+    const auto& coordinate = bound.node_layout->elements[linear].index;
+    const auto logical = plan ? coordinate.values[plan->dimension] : 0;
     detail::MappedAccessFrame mapped;
     detail::ScalarAccessFrame frame{&bound,
                                     address,
@@ -1214,7 +1214,7 @@ REGFW_DETAIL_ALWAYS_INLINE inline std::optional<RegMmioReadResult> RegisterMap::
     Node* node = nullptr;
     std::uint32_t linear;
     const detail::ScalarAccessSite* site;
-    const RegElementIndex* index;
+    const detail::RegViewLayout* layout;
     auto target = address;
     if (formula_) {
         if (!formula_->find_prepared(address, hit))
@@ -1228,7 +1228,7 @@ REGFW_DETAIL_ALWAYS_INLINE inline std::optional<RegMmioReadResult> RegisterMap::
             node = context.node;
             linear = context.binding->linear + hit.access->linear;
             site = &context;
-            index = &hit.access->index;
+            layout = context.node_layout;
             target = hit.canonical(address);
         }
     } else {
@@ -1244,11 +1244,11 @@ REGFW_DETAIL_ALWAYS_INLINE inline std::optional<RegMmioReadResult> RegisterMap::
         direct.instance = entry->source_instance;
         site = &direct;
         linear = entry->linear;
-        index = &entry->view->elements[linear].index;
+        layout = entry->view;
     }
     if (node)
         if (auto result =
-                fast_scalar<Writing>(address, value, *node, linear, *site, *index, target))
+                fast_scalar<Writing>(address, value, *node, linear, *site, layout, target))
             return result;
     if (hit.context) {
         // A generic access (including enabled access logging) reuses the initial hit.

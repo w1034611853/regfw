@@ -52,15 +52,16 @@ class FormulaDecoder {
     std::vector<std::vector<ElementRecord>> record_storage_;
     std::vector<Reserve> reserves_; // base-sorted, highest priority wins
     // Prepared shared EntityLayout. Each local 4-byte address maps directly
-    // to n-dimensional index and immutable access metadata.
+    // to an element ordinal and immutable access metadata. Coordinates remain
+    // in the entity layout and are borrowed only when the access needs them.
     // VF aliases share the geometry map, not callback/storage instances.
     // Shared, immutable register-location metadata. An index has a dynamic
     // rank (1..MAX_REG_DIMS), not hard-coded index0/index1. Callback and
     // storage objects belong to a *mounted instance*, never to this layout.
     struct PreparedAccessInfo {
         std::uint32_t ordinal{STATIC_NONE}, linear{}, byte{}, available{};
-        RegElementIndex index{};
     };
+    static_assert(sizeof(PreparedAccessInfo) == 16);
     struct EntityHashLayout {
         std::unordered_map<std::uint64_t, PreparedAccessInfo> words;
         bool has_priority_aliases{};
@@ -266,7 +267,6 @@ class FormulaDecoder {
                         access.linear = linear;
                         access.byte = byte;
                         access.available = arr.occupied - byte;
-                        access.index = binding.node->layout().elements[actual_linear].index;
                         const auto [it, inserted] = layout->words.try_emplace(key, access);
                         if (!inserted) {
                             layout->has_priority_aliases = true;
@@ -479,7 +479,7 @@ class FormulaDecoder {
         entry.byte_offset = info.byte;
         entry.source_instance = bound.instance;
         entry.view = bound.node_layout;
-        entry.precomputed_index = &info.index;
+        entry.precomputed_index = nullptr;
     }
     // Dynamic (AddressSpace/RegView) layouts use the same decoder as compiled
     // static layouts. The compiler emits one pattern mount per mapped REG

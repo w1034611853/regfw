@@ -995,7 +995,7 @@ class RegisterMap {
                                                  Node& node,
                                                  std::uint32_t linear,
                                                  const detail::ScalarAccessSite& site,
-                                                 const RegElementIndex& index,
+                                                 const detail::RegViewLayout* layout,
                                                  std::uint64_t target);
     std::optional<RegData> fast_scalar_resolved(Resolution& r, bool writing);
     template <bool Writing, class Selection>
