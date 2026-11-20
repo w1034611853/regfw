@@ -296,10 +296,6 @@ struct SparseLookup<E>::SparsePages {
 };
 template <class E>
 SparseLookup<E>::SparseLookup(std::uint64_t bytes) : bytes_(bytes) {
-    if (bytes > (std::uint64_t{1} << 32))
-        sparse_ = std::make_unique<SparsePages>();
-    else
-        pages_.resize(bytes / 4096 + (bytes % 4096 != 0));
 }
 template <class E>
 SparseLookup<E>::~SparseLookup() = default;
@@ -330,6 +326,8 @@ const E* SparseLookup<E>::get(std::uint64_t address) const {
             page = it->second.get();
         }
     } else {
+        if (pages_.empty())
+            return nullptr;
         page = pages_[p].get();
         if (!page)
             return nullptr;
@@ -343,6 +341,12 @@ void SparseLookup<E>::insert(std::uint64_t address, E value) {
         throw Error("lookup address collision/outside map", ErrorKind::Configuration);
     if (entries_.size() >= empty)
         throw Error("lookup entry overflow", ErrorKind::Configuration);
+    if (!sparse_ && pages_.empty()) {
+        if (bytes_ > (std::uint64_t{1} << 32))
+            sparse_ = std::make_unique<SparsePages>();
+        else
+            pages_.resize(bytes_ / 4096 + (bytes_ % 4096 != 0));
+    }
     if (sparse_)
         sparse_->frozen.clear();
     auto& page = sparse_ ? sparse_->pages[address >> 12] : pages_[address >> 12];

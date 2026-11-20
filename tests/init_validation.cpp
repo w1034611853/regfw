@@ -1,4 +1,5 @@
 #include <regfw/regfw.hpp>
+#include "../src/internal/entity_state.hpp"
 #include <iostream>
 #include <random>
 #include <stdexcept>
@@ -70,6 +71,13 @@ void holes_and_arrays(bool storage) {
     });
     CHECK(map.entity_count() == before);
     conflict([&] {
+        // Outer span equals count * occupied despite duplicate addresses and
+        // holes; this is not a contiguous array.
+        p.add<std::uint32_t>("FALSE_DENSE",
+                             reg::at(0x900).array(reg::dims(2, 2, 2), reg::strides(4, 4, 20)));
+    });
+    CHECK(map.entity_count() == before);
+    conflict([&] {
         p.add<reg::u512>("SELF", reg::at(0x400).array(reg::dims(2, 2), reg::strides(32, 128)));
     });
     CHECK(map.entity_count() == before);
@@ -94,10 +102,68 @@ void holes_and_arrays(bool storage) {
         CHECK(map.mmio_read(56) == 7 && map.mmio_read(60) == 9 && map.mmio_read(0x400) == 19);
     }
 }
+void contiguous_claims(bool storage) {
+    reg::RegisterMap map(0x1000, "ROOT");
+    Probe p(reg::RegScope(map, 0, 0x1000, "P", {}, {}, {}, 1, 0, 0, false, storage));
+    auto transposed = p.add<std::uint32_t>(
+        "TRANSPOSED", reg::at(0x100).array(reg::dims(3, 2), reg::strides(4, 12)));
+    auto adjacent = p.add<std::uint32_t>("ADJACENT", reg::at(0x118));
+    conflict([&] {
+        p.add<std::uint32_t>("MIDDLE", reg::at(0x108));
+    });
+    conflict([&] {
+        p.add<std::uint32_t>("EXTENDS_INTO_ARRAY",
+                             reg::at(0xfc).array(reg::dims(2), reg::strides(4)));
+    });
+    transposed.at(2, 1).ref() = 43;
+    adjacent.ref() = 44;
+    map.finalize();
+    CHECK(transposed.at(2, 1).ref() == 43 && adjacent.ref() == 44);
+    if (!storage)
+        CHECK(map.mmio_read(0x114) == 43 && map.mmio_read(0x118) == 44);
+}
+void lazy_lookup() {
+    for (const std::uint64_t bytes : {std::uint64_t{0x2000}, UINT64_MAX & ~std::uint64_t{3}}) {
+        reg::detail::SparseLookup<unsigned> table(bytes);
+        CHECK(table.get(0) == nullptr && table.get(bytes - 4) == nullptr);
+        table.freeze();
+        table.for_each([](auto, auto) {
+            CHECK(false);
+        });
+        table.for_each_mut([](auto, auto&) {
+            CHECK(false);
+        });
+        table.clear();
+        table.insert(bytes - 4, 7);
+        table.insert(0, 8);
+        table.freeze();
+        CHECK(*table.get(bytes - 4) == 7 && *table.get(0) == 8 && !table.get(4));
+        table.insert(4, 9); // Invalidate/rebuild the sparse frozen directory.
+        table.freeze();
+        std::vector<std::uint64_t> addresses;
+        table.for_each_mut([&](auto address, unsigned& value) {
+            addresses.push_back(address);
+            ++value;
+        });
+        CHECK((addresses == std::vector<std::uint64_t>{0, 4, bytes - 4}));
+        CHECK(*table.get(4) == 10);
+        table.clear();
+        CHECK(!table.get(0) && !table.get(bytes - 4));
+        table.freeze();
+        table.insert(bytes - 4, 11);
+        reg::detail::SparseLookup<unsigned> other(4);
+        table.swap(other);
+        CHECK(!table.get(0) && !table.get(4) && *other.get(bytes - 4) == 11);
+        table.insert(0, 12);
+        CHECK(*table.get(0) == 12);
+    }
+}
 int main() try {
+    lazy_lookup();
     for (bool storage : {false, true}) {
         randomized(storage);
         holes_and_arrays(storage);
+        contiguous_claims(storage);
     }
     std::cout << "PASS: interval claims, arbitrary order, holes, wide/transposed overlaps, failed "
                  "install, snapshot\n";

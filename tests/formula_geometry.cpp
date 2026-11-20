@@ -41,6 +41,20 @@ struct ReserveRegs : reg::RegEntityBundle {
     REG(TABLE, std::uint32_t, reg::at(0));
     REG_SCHEMA(&ReserveRegs::TABLE);
 };
+struct ReservePruneLayout : reg::Bundle {
+    REG_BUNDLE(ReservePruneLayout);
+    REG_ENTITY(a, CoordA);
+    REG_ENTITY(b, CoordB);
+    REG_LAYOUT([&] {
+        // The first mount ends after the second. A reserve near its end must
+        // not be pruned using only the immediately preceding mount's end.
+        return reg::address_space("PRUNE")
+            .map(reg::view("A", 0x400).map(a), 0)
+            .map(reg::view("B", 0x200).map(b), 0xf0)
+            .map(reg::view("RES", 4).reserve(0, 4), 0x300, 10)
+            .map(reg::view("GAP", 4).reserve(0, 4), 0x304, 10);
+    });
+};
 struct ReserveLayout : reg::Bundle {
     REG_BUNDLE(ReserveLayout);
     REG_ENTITY(regs, ReserveRegs);
@@ -85,6 +99,44 @@ struct ConflictLayout : reg::Bundle {
         return reg::address_space("CONFLICT").map(v, 0).map(v, 0);
     });
 };
+template <bool Transposed>
+struct GeometryRegs : reg::RegEntityBundle {
+    REG_BUNDLE(GeometryRegs);
+    REG(DATA,
+        std::uint32_t,
+        reg::at(0).array(reg::dims(4, 16), reg::strides(Transposed ? 4 : 64, Transposed ? 16 : 4)));
+};
+struct GeometryViews : reg::Bundle {
+    REG_BUNDLE(GeometryViews);
+    REG_ENTITY(a, GeometryRegs<false>);
+    REG_ENTITY(b, GeometryRegs<true>);
+    REG_ENTITY(c, GeometryRegs<false>);
+    REG_LAYOUT([&] {
+        return reg::address_space("GEOMETRY")
+            .map(reg::view("A", 0x100).map(a), 0)
+            .map(reg::view("B", 0x100).map(b), 0x1000)
+            .map(reg::view("C", 0x100).map(c), 0x2000)
+            .map(reg::view("ALIAS", 0x100).map(a), 0x3000);
+    });
+};
+void check_shared_geometry() {
+    reg::RegisterBank<GeometryViews> bank(reg::space(0x4000).finalize());
+    for (unsigned row = 0; row < 4; ++row)
+        for (unsigned col = 0; col < 16; ++col) {
+            const auto linear = row * 16 + col;
+            bank->a.DATA.at(row, col).ref() = 100 + linear;
+            bank->b.DATA.at(row, col).ref() = 200 + linear;
+            bank->c.DATA.at(row, col).ref() = 300 + linear;
+        }
+    for (unsigned row = 0; row < 4; ++row)
+        for (unsigned col = 0; col < 16; ++col) {
+            const auto linear = row * 16 + col;
+            CHECK(bank.map().mmio_read(linear * 4) == 100 + linear);
+            CHECK(bank.map().mmio_read(0x1000 + row * 4 + col * 16) == 200 + linear);
+            CHECK(bank.map().mmio_read(0x2000 + linear * 4) == 300 + linear);
+            CHECK(bank.map().mmio_read(0x3000 + linear * 4) == 100 + linear);
+        }
+}
 
 // Each large leaf keeps its own prepared View. Sparse overlay holes must
 // fall through, and reserves belonging to one VF/entrance must not mask another.
@@ -172,6 +224,12 @@ void check_reserve() {
     CHECK(!bank.map().mmio_write(0x2800, 1u).success());
     CHECK(!bank.map().try_mmio_read_sized(0x2810, 4).success());
     CHECK(bank.map().describe_layout(reg::LayoutDetail::Full).find("RESV") != std::string::npos);
+    reg::RegisterBank<ReservePruneLayout> pruned(reg::space(0x400).finalize());
+    CHECK(pruned.map().mmio_write(0x200, 11).success());
+    CHECK(pruned.map().mmio_write(0x1f0, 12).success());
+    CHECK(pruned->a.A.at(2) == 11 && pruned->b.B.at(1) == 12);
+    CHECK(!pruned.map().try_mmio_read_sized(0x300, 4).success());
+    CHECK(pruned.map().layout_warnings().size() == 1);
 }
 void check_conflict() {
     bool rejected = false;
@@ -195,6 +253,7 @@ int main() {
     try {
         check_coord();
         check_partitioned_views();
+        check_shared_geometry();
         check_reserve();
         check_shadow();
         check_conflict();

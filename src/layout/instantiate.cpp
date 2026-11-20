@@ -196,6 +196,36 @@ std::size_t detail::ResetSet::reset() const {
         n->reset();
     return nodes.size();
 }
+namespace {
+// Prove that every occupied interval touches its neighbor, regardless of
+// declaration-axis order. A matching outer span alone does not exclude holes
+// and duplicate element addresses.
+std::uint64_t contiguous_span(std::span<const std::size_t> dims,
+                              std::span<const std::uint64_t> strides,
+                              unsigned occupied) {
+    std::array<std::pair<std::uint64_t, std::size_t>, MAX_REG_DIMS> axes{};
+    if (dims.size() > axes.size() || dims.size() != strides.size())
+        return 0;
+    std::size_t count = 0;
+    for (std::size_t d = 0; d < dims.size(); ++d)
+        if (dims[d] > 1) {
+            auto pos = count++;
+            while (pos && axes[pos - 1].first > strides[d]) {
+                axes[pos] = axes[pos - 1];
+                --pos;
+            }
+            axes[pos] = {strides[d], dims[d]};
+        }
+    std::uint64_t span = occupied;
+    for (std::size_t d = 0; d < count; ++d) {
+        const auto [stride, extent] = axes[d];
+        if (stride != span || extent > UINT64_MAX / span)
+            return 0;
+        span *= extent;
+    }
+    return span;
+}
+} // namespace
 std::vector<std::uint64_t> RegScope::prepare_reg(std::string_view name,
                                                  const detail::RegisterConfig& spec,
                                                  unsigned value_bits) {
@@ -227,12 +257,16 @@ std::vector<std::uint64_t> RegScope::prepare_reg(std::string_view name,
     }
     std::vector<std::uint64_t> addresses;
     addresses.reserve(count);
+    const auto contiguous = contiguous_span(spec.dimensions, spec.stride_bytes, occupied);
+    if (contiguous)
+        check_claim(spec.offset, contiguous, name, spec.location);
     for (std::size_t k = 0; k < count; ++k) {
         auto index = RegElementIndex::from_dims(spec.dimensions, k);
         auto address = spec.offset;
         for (std::size_t d = 0; d < spec.dimensions.size(); ++d)
             address += std::uint64_t(index.values[d]) * spec.stride_bytes[d];
-        check_claim(address, occupied, name, spec.location);
+        if (!contiguous)
+            check_claim(address, occupied, name, spec.location);
         addresses.push_back(address);
     }
     return addresses;
@@ -242,9 +276,16 @@ void RegScope::finish_reg(std::string_view name,
                           std::span<const std::uint64_t> addresses,
                           unsigned occupied,
                           detail::EntityState* node) {
-    for (auto address : addresses)
-        claims.try_emplace(
-            address, address, occupied, std::string(name), node->declaration_location);
+    if (const auto contiguous = contiguous_span(node->dims, node->layout().strides, occupied))
+        claims.try_emplace(addresses.front(),
+                           addresses.front(),
+                           contiguous,
+                           std::string(name),
+                           node->declaration_location);
+    else
+        for (auto address : addresses)
+            claims.try_emplace(
+                address, address, occupied, std::string(name), node->declaration_location);
     for (auto set = reset_set; set; set = set->parent)
         set->nodes.push_back(node);
 }

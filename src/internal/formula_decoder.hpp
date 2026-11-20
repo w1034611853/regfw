@@ -225,6 +225,42 @@ class FormulaDecoder {
         }
         return true;
     }
+    std::uint64_t entity_geometry_hash(const EntityView& view) const {
+        std::uint64_t hash = 0xcbf29ce484222325ULL;
+        const auto mix = [&](std::uint64_t value) {
+            hash ^= value;
+            hash *= 0x100000001b3ULL;
+        };
+        mix(view.mounts.size());
+        for (const auto id : view.mounts) {
+            const auto& mount = mounts_[id];
+            const auto& binding = bindings_[mount.binding];
+            const auto& array = arrays_[mount.array];
+            mix(mount.base - view.base);
+            mix(mount.end - mount.base);
+            mix(binding.linear);
+            mix(array.count);
+            mix(array.occupied);
+            mix(static_cast<std::uint64_t>(array.kind));
+            mix(array.rank);
+            mix(array.span);
+            for (const auto stride : array.strides_decl)
+                mix(stride);
+            for (const auto extent : array.extents_decl)
+                mix(extent);
+            if (array.kind == FormulaDecodeKind::Table) {
+                mix(array.sparse.size());
+                for (const auto& element : array.sparse) {
+                    mix(element.offset);
+                    mix(element.linear);
+                }
+            }
+            mix(binding.node->dims.size());
+            for (const auto dim : binding.node->dims)
+                mix(dim);
+        }
+        return hash;
+    }
     void finish_entity_hash() {
         // One EntityView per actual mapping scope (not per full AddressSpace
         // View). The key is an entity-local offset, so aliases use identical
@@ -269,13 +305,14 @@ class FormulaDecoder {
             for (const auto id : view.mounts)
                 view.end = std::max(view.end, mounts_[id].end);
         }
+        std::unordered_map<std::uint64_t, std::vector<std::size_t>> geometry_buckets;
         for (auto& view : entity_views_) {
             // The mount vector is base-sorted, so the same Bundle declaration
             // produces matching ordinals under different mount bases.
-            for (const auto& earlier : entity_views_) {
-                if (&earlier == &view)
-                    break;
-                if (!earlier.layout->has_priority_aliases && same_entity_geometry(earlier, view)) {
+            auto& candidates = geometry_buckets[entity_geometry_hash(view)];
+            for (const auto id : candidates) {
+                const auto& earlier = entity_views_[id];
+                if (same_entity_geometry(earlier, view)) {
                     view.layout = earlier.layout;
                     break;
                 }
@@ -334,6 +371,10 @@ class FormulaDecoder {
             entity_hash_bytes_ += layout->dense.capacity() * sizeof(PreparedAccessInfo);
             entity_hash_bytes_ += layout->sparse.capacity() * sizeof(EntityHashLayout::SparseSlot);
             view.layout = std::move(layout);
+            // Only distinct, shareable representatives enter the temporary
+            // buckets. Fingerprint matches still require exact geometry equality.
+            if (!view.layout->has_priority_aliases)
+                candidates.push_back(&view - entity_views_.data());
             ++entity_layout_count_;
         }
         for (auto& view : entity_views_) {

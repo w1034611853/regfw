@@ -167,10 +167,25 @@ void for_each_reserved_occupied(const Reserves& reserves,
                                 const Mounts& mounts,
                                 const Arrays& arrays,
                                 F&& visit) {
+    if (reserves.empty())
+        return;
+    // Mounts are base-sorted, but their ends need not be monotonic (a large
+    // sparse mount may contain many smaller ones).
+    std::vector<std::uint64_t> prefix_end;
+    prefix_end.reserve(mounts.size());
+    std::uint64_t end = 0;
+    for (const auto& mount : mounts) {
+        end = std::max(end, mount.end);
+        prefix_end.push_back(end);
+    }
     std::vector<ElementRef> elements;
-    for (const auto& reserve : reserves)
-        for (const auto& mount : mounts) {
-            if (mount.base >= reserve.end || reserve.base >= mount.end)
+    for (const auto& reserve : reserves) {
+        const auto first = std::upper_bound(prefix_end.begin(), prefix_end.end(), reserve.base);
+        for (auto k = std::size_t(first - prefix_end.begin()); k < mounts.size(); ++k) {
+            const auto& mount = mounts[k];
+            if (mount.base >= reserve.end)
+                break;
+            if (reserve.base >= mount.end)
                 continue;
             const auto lo = std::max(reserve.base, mount.base),
                        hi = std::min(reserve.end, mount.end);
@@ -178,6 +193,7 @@ void for_each_reserved_occupied(const Reserves& reserves,
             if (!elements.empty())
                 visit(reserve, mount);
         }
+    }
 }
 } // namespace
 
