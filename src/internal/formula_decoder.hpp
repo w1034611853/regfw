@@ -120,7 +120,7 @@ class FormulaDecoder {
         // storage. No function pointer or mutable state is snapshotted here.
     };
     struct EntityView {
-        std::uint64_t base{}, end{}, prefix_max_end{};
+        std::uint64_t base{}, end{};
         std::uint32_t scope{};
         std::vector<std::uint32_t> mounts; // mount ordinal -> per-instance binding
         std::vector<PreparedMountContext> prepared;
@@ -144,6 +144,16 @@ class FormulaDecoder {
 
   private:
     std::vector<EntityView> entity_views_;
+    // Compact search keys and overlap metadata, parallel to sorted entity_views_.
+    // Reserve slices contain indices into the immutable global reserve list.
+    struct ViewMeta {
+        std::uint64_t end{}, prefix_max_end{};
+        std::size_t reserve_begin{}, reserve_count{};
+        bool isolated{};
+    };
+    std::vector<std::uint64_t> view_bases_;
+    std::vector<ViewMeta> view_metas_;
+    std::vector<std::size_t> view_reserve_indices_;
     std::size_t entity_layout_count_{}, entity_hash_bytes_{};
     bool same_array_shape(std::uint32_t a_id, std::uint32_t b_id) const {
         const auto& a = arrays_[a_id];
@@ -209,7 +219,7 @@ class FormulaDecoder {
                 const auto& sc = scopes_[group];
                 if (sc.size > UINT64_MAX - sc.base)
                     throw Error("entity hash: view range overflow", ErrorKind::Configuration);
-                entity_views_.push_back({sc.base, sc.base + sc.size, 0, group, {}, {}, {}, {}});
+                entity_views_.push_back({sc.base, sc.base + sc.size, group, {}, {}, {}, {}});
             }
             entity_views_[it->second].mounts.push_back(id);
         }
@@ -315,11 +325,26 @@ class FormulaDecoder {
         std::sort(entity_views_.begin(), entity_views_.end(), [](const auto& a, const auto& b) {
             return a.base < b.base || (a.base == b.base && a.scope < b.scope);
         });
+        view_bases_.reserve(entity_views_.size());
+        view_metas_.reserve(entity_views_.size());
         std::uint64_t max_end = 0;
-        for (auto& v : entity_views_) {
-            max_end = std::max(max_end, v.end);
-            v.prefix_max_end = max_end;
+        for (const auto& view : entity_views_) {
+            max_end = std::max(max_end, view.end);
+            view_bases_.push_back(view.base);
+            ViewMeta meta{view.end, max_end, view_reserve_indices_.size()};
+            for (std::size_t r = 0; r < reserves_.size(); ++r) {
+                if (reserves_[r].base >= view.end)
+                    break;
+                if (reserves_[r].end > view.base)
+                    view_reserve_indices_.push_back(r);
+            }
+            meta.reserve_count = view_reserve_indices_.size() - meta.reserve_begin;
+            view_metas_.push_back(meta);
         }
+        for (std::size_t i = 0; i < entity_views_.size(); ++i)
+            view_metas_[i].isolated =
+                (i == 0 || view_metas_[i - 1].prefix_max_end <= view_bases_[i]) &&
+                (i + 1 == entity_views_.size() || view_bases_[i + 1] >= view_metas_[i].end);
         if (std::getenv("REGFW_ENTITY_HASH_STATS")) {
             std::size_t keys = 0;
             for (const auto& v : entity_views_)
@@ -354,26 +379,18 @@ class FormulaDecoder {
                 continue;
             for (std::size_t id = 0; id < window.count; ++id) {
                 const auto base = window.base + id * window.stride + inner;
-                const auto it =
-                    std::lower_bound(entity_views_.begin(),
-                                     entity_views_.end(),
-                                     base,
-                                     [](const EntityView& candidate, std::uint64_t address) {
-                                         return candidate.base < address;
-                                     });
-                if (it == entity_views_.end() || it->base != base || it->end - base != span ||
-                    it->layout != view.layout)
+                const auto it = std::lower_bound(view_bases_.begin(), view_bases_.end(), base);
+                if (it == view_bases_.end() || *it != base)
                     continue;
-                // Any competing View or Reserve keeps the general decoder.
-                if ((it != entity_views_.begin() && (it - 1)->prefix_max_end > base) ||
-                    (it + 1 != entity_views_.end() && (it + 1)->base < it->end) ||
-                    std::any_of(reserves_.begin(), reserves_.end(), [&](const auto& r) {
-                        return r.base < it->end && r.end > base;
-                    }))
+                const auto index = static_cast<std::size_t>(it - view_bases_.begin());
+                const auto& candidate = entity_views_[index];
+                const auto& meta = view_metas_[index];
+                if (meta.end - base != span || candidate.layout != view.layout || !meta.isolated ||
+                    meta.reserve_count)
                     continue;
                 if (view.identity_targets.empty())
                     view.identity_targets.resize(window.count);
-                view.identity_targets[id] = &*it;
+                view.identity_targets[id] = &candidate;
             }
         }
         if (std::getenv("REGFW_ENTITY_HASH_STATS")) {
@@ -391,22 +408,37 @@ class FormulaDecoder {
         }
     }
     bool lookup_prepared(std::uint64_t word, PreparedHit& hit) const noexcept {
-        std::size_t low = 0, high = entity_views_.size();
+        std::size_t low = 0, high = view_bases_.size();
         while (low < high) {
             const auto mid = low + (high - low) / 2;
-            if (entity_views_[mid].base <= word)
+            if (view_bases_[mid] <= word)
                 low = mid + 1;
             else
                 high = mid;
         }
+        if (low == 0)
+            return false;
+        const auto top = low - 1;
+        if (view_metas_[top].isolated) {
+            if (word >= view_metas_[top].end)
+                return false;
+            const auto& view = entity_views_[top];
+            const auto* found = view.layout->find(word - view_bases_[top]);
+            if (!found)
+                return false;
+            hit = {&view, &view.prepared[found->ordinal], found};
+            return true;
+        }
         const Mount* winner = nullptr;
         while (low) {
-            const auto& view = entity_views_[--low];
-            if (view.prefix_max_end <= word)
+            const auto index = --low;
+            const auto& meta = view_metas_[index];
+            if (meta.prefix_max_end <= word)
                 break;
-            if (word >= view.end)
+            if (word >= meta.end)
                 continue;
-            const auto* found = view.layout->find(word - view.base);
+            const auto& view = entity_views_[index];
+            const auto* found = view.layout->find(word - view_bases_[index]);
             if (!found)
                 continue;
             const auto& access = *found;
@@ -423,8 +455,11 @@ class FormulaDecoder {
     bool find_prepared(std::uint64_t word, PreparedHit& hit) const noexcept {
         if (!lookup_prepared(word, hit))
             return false;
-        // An occupied REG can be masked by a higher-priority Reserve.
-        for (const auto& r : reserves_) {
+        // Only reserves intersecting the winning View can mask its occupied REG.
+        const auto& meta = view_metas_[static_cast<std::size_t>(hit.view - entity_views_.data())];
+        const auto end = meta.reserve_begin + meta.reserve_count;
+        for (auto i = meta.reserve_begin; i < end; ++i) {
+            const auto& r = reserves_[view_reserve_indices_[i]];
             if (word < r.base)
                 break;
             if (word >= r.end)

@@ -86,6 +86,68 @@ struct ConflictLayout : reg::Bundle {
     });
 };
 
+// Each large leaf keeps its own prepared View. Sparse overlay holes must
+// fall through, and reserves belonging to one VF/entrance must not mask another.
+struct PartitionRegs : reg::RegEntityBundle {
+    REG_BUNDLE(PartitionRegs);
+    REG(DATA, std::uint32_t, reg::at(0).array(reg::dims(64), reg::strides(8)));
+};
+struct PartitionLayout : reg::Bundle {
+    REG_BUNDLE(PartitionLayout);
+    REG_REPEAT_ENTITY(vf, PartitionRegs, 3);
+    REG_ENTITY(overlay, PartitionRegs);
+    REG_LAYOUT([&] {
+        auto root = reg::view("PARTITIONS", 0x3000)
+                        .map_repeat("VF",
+                                    0x1000,
+                                    reg::repeat(3).stride(0x400),
+                                    [&](auto i) {
+                                        return reg::view("REGS", 0x400).map(vf[i]);
+                                    })
+                        .map(reg::view("OVERLAY", 0x200).map(overlay), 0x1004, 10)
+                        .map(reg::view("BLOCK_VF0", 4).reserve(0, 4), 0x1008, 20)
+                        .map(reg::view("LOWER_VF1", 4).reserve(0, 4), 0x1410, -1)
+                        .map(reg::view("BLOCK_VF2", 4).reserve(0, 4), 0x1818, 20);
+        for (unsigned i = 0; i < 48; ++i)
+            root = root.reserve(i * 8, 4);
+        return reg::address_space("PARTITION_ROOT")
+            .map(root, 0xc100000000ULL)
+            .map(root, 0xff7100000000ULL);
+    });
+};
+void check_partitioned_views() {
+    reg::RegisterBank<PartitionLayout> bank(reg::space());
+    bank.finish();
+    for (const auto base : {0xc100000000ULL, 0xff7100000000ULL}) {
+        for (unsigned vf = 0; vf < 3; ++vf)
+            for (unsigned i = 0; i < 64; ++i) {
+                const auto address = base + 0x1000 + vf * 0x400 + i * 8;
+                const bool blocked = (vf == 0 && i == 1) || (vf == 2 && i == 3);
+                const auto written = bank.map().mmio_write(address, vf * 1000 + i + 1);
+                const auto read = bank.map().try_mmio_read_sized(address, 4);
+                CHECK(written.result ==
+                      (blocked ? reg::RegMemTxResult::DecodeError : reg::RegMemTxResult::Ok));
+                CHECK(read.result == written.result);
+                if (!blocked)
+                    CHECK(read.value == vf * 1000 + i + 1);
+                // The high-priority overlay occupies only VF0's odd words.
+                const auto hole = address + 4;
+                if (vf == 0) {
+                    CHECK(bank.map().mmio_write(hole, 0x8000 + i).success());
+                    CHECK(bank->overlay.DATA.at(i).ref() == 0x8000 + i);
+                } else
+                    CHECK(bank.map().try_mmio_read_sized(hole, 4).result ==
+                          reg::RegMemTxResult::DecodeError);
+            }
+        for (const auto offset : {0u, 0x17fcu, 0x1a00u, 0x2ffcu, 0x3000u})
+            CHECK(bank.map().try_mmio_read_sized(base + offset, 4).result ==
+                  reg::RegMemTxResult::DecodeError);
+    }
+    CHECK(bank->vf[0].DATA.at(1).ref() == 0 && bank->vf[2].DATA.at(3).ref() == 0);
+    CHECK(bank.map().describe_layout(reg::LayoutDetail::Full).find("PARTITIONS") !=
+          std::string::npos);
+}
+
 void check_coord() {
     reg::RegisterBank<CoordLayout> bank(reg::space(0x400).name("COORD"));
     bank->a.A.at(0).ref() = 0x11111111u;
@@ -132,6 +194,7 @@ void check_shadow() {
 int main() {
     try {
         check_coord();
+        check_partitioned_views();
         check_reserve();
         check_shadow();
         check_conflict();
