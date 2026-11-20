@@ -877,6 +877,53 @@ RegMmioReadResult RegisterMap::read_transaction(Resolution& r) {
     return {lane};
 }
 
+namespace {
+std::uint32_t
+store_scalar_word(std::byte* data, std::uint32_t before, std::uint32_t value, std::uint32_t mask) {
+    const auto after = (before & ~mask) | (value & mask);
+    std::memcpy(data, &after, sizeof(after));
+    return after;
+}
+} // namespace
+
+// The caller selects the register and samples storage at the point required
+// by its resolver and hook pipeline.
+template <bool Writing, class Log>
+REGFW_DETAIL_ALWAYS_INLINE inline RegMmioReadResult
+RegisterMap::execute_scalar(Node& n, std::byte* p, detail::ScalarAccessFrame& frame, Log&& log) {
+    if constexpr (Writing) {
+        frame.after = store_scalar_word(p, frame.before, frame.raw, n.writable_mask);
+        log(frame.after);
+        if (auto* fn = n.write_callback.get())
+            try {
+                fn->from_frame(frame.before, frame);
+            } catch (...) {
+                log_error("on_write", n.name, frame);
+            }
+        return {};
+    } else {
+        RegData returned = frame.before;
+        bool source_ok = true;
+        if (auto* fn = n.read_callback.get())
+            try {
+                returned = fn->from_frame(returned, frame) & 0xffffffff;
+            } catch (...) {
+                log_error("on_read", n.name, frame);
+                returned = REG_READ_CALLBACK_ERROR_MAGIC & 0xffffffff;
+                source_ok = false;
+            }
+        log(returned);
+        if (source_ok)
+            if (auto* fn = n.read_complete_callback.get())
+                try {
+                    fn->from_frame(returned, frame);
+                } catch (...) {
+                    log_error("on_read_complete", n.name, frame);
+                }
+        return {returned};
+    }
+}
+
 // Scalar and mapped fast paths (preserve the same callback/transaction semantics).
 template <bool Writing>
 REGFW_DETAIL_ALWAYS_INLINE inline std::optional<RegMmioReadResult>
@@ -893,10 +940,8 @@ RegisterMap::fast_scalar(std::uint64_t address,
     auto* p = n.scalar_data + std::size_t(linear) * n.scalar_stride;
     std::uint32_t stored;
     std::memcpy(&stored, p, 4);
-    auto mask = static_cast<std::uint32_t>(n.writable_mask);
-    auto after = (stored & ~mask) | (std::uint32_t(value) & mask);
     if (writing && !n.write_callback) {
-        std::memcpy(p, &after, 4);
+        store_scalar_word(p, stored, value, n.writable_mask);
         return RegMmioReadResult{};
     }
     if (!writing && !n.read_callback && !n.read_complete_callback)
@@ -906,40 +951,16 @@ RegisterMap::fast_scalar(std::uint64_t address,
                                     address,
                                     writing ? std::uint32_t(value) : 0,
                                     stored,
-                                    writing ? after : stored,
+                                    stored,
                                     writing ? RegTransactionKind::Write : RegTransactionKind::Read,
                                     nullptr,
                                     &layout->indices[linear],
                                     target};
-    if (writing) {
-        std::memcpy(p, &after, 4);
-        try {
-            n.write_callback->from_frame(stored, frame);
-        } catch (...) {
-            log_error("on_write", n.name, frame);
-        }
-        return RegMmioReadResult{};
-    }
-    RegData returned = stored;
-    bool source_ok = true;
-    if (auto* fn = n.read_callback.get())
-        try {
-            returned = fn->from_frame(returned, frame) & 0xffffffff;
-        } catch (...) {
-            log_error("on_read", n.name, frame);
-            returned = REG_READ_CALLBACK_ERROR_MAGIC & 0xffffffff;
-            source_ok = false;
-        }
-    if (const auto level = access_log_level(n); level != HLOG_LEVEL_OFF)
-        log_frame(level, "Read", n.layout().names[linear], frame, returned);
-    if (source_ok)
-        if (auto* fn = n.read_complete_callback.get())
-            try {
-                fn->from_frame(returned, frame);
-            } catch (...) {
-                log_error("on_read_complete", n.name, frame);
-            }
-    return RegMmioReadResult{returned};
+    return execute_scalar<Writing>(n, p, frame, [&](RegData returned) {
+        if constexpr (!Writing)
+            if (const auto level = access_log_level(n); level != HLOG_LEVEL_OFF)
+                log_frame(level, "Read", layout->names[linear], frame, returned);
+    });
 }
 
 template <bool Writing, class Selection>
@@ -1001,9 +1022,7 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
     const bool unobserved = !hooks && !callbacks;
     const auto plain = [&](std::uint32_t index, std::uint32_t before) {
         if constexpr (Writing) {
-            const auto mask = std::uint32_t(n.writable_mask);
-            const auto after = (before & ~mask) | (std::uint32_t(value) & mask);
-            std::memcpy(data_at(index), &after, sizeof(after));
+            store_scalar_word(data_at(index), before, value, n.writable_mask);
             return RegMmioReadResult{0};
         } else {
             return RegMmioReadResult{before};
@@ -1117,39 +1136,7 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
                       frame,
                       returned);
     };
-    if (writing) {
-        const auto mask = std::uint32_t(n.writable_mask),
-                   after = (before & ~mask) | (std::uint32_t(value) & mask);
-        std::memcpy(p, &after, 4);
-        frame.after = after;
-        log(after);
-        if (auto* fn = n.write_callback.get())
-            try {
-                fn->from_frame(before, frame);
-            } catch (...) {
-                log_error("on_write", n.name, frame);
-            }
-        return RegMmioReadResult{0};
-    }
-    RegData returned = before;
-    bool source_ok = true;
-    if (auto* fn = n.read_callback.get())
-        try {
-            returned = fn->from_frame(returned, frame) & 0xffffffff;
-        } catch (...) {
-            log_error("on_read", n.name, frame);
-            returned = REG_READ_CALLBACK_ERROR_MAGIC & 0xffffffff;
-            source_ok = false;
-        }
-    log(returned);
-    if (source_ok)
-        if (auto* fn = n.read_complete_callback.get())
-            try {
-                fn->from_frame(returned, frame);
-            } catch (...) {
-                log_error("on_read_complete", n.name, frame);
-            }
-    return RegMmioReadResult{returned};
+    return execute_scalar<Writing>(n, p, frame, log);
 }
 
 std::optional<RegData> RegisterMap::fast_scalar_resolved(Resolution& r, bool writing) {
@@ -1168,10 +1155,7 @@ std::optional<RegData> RegisterMap::fast_scalar_resolved(Resolution& r, bool wri
     // the complete path, after validation/derivation and before behavior.
     i.stored_before = i.stored_after = stored;
     if (writing) {
-        auto mask = std::uint32_t(n.writable_mask);
-        auto after = (stored & ~mask) | (std::uint32_t(i.raw_data) & mask);
-        std::memcpy(p, &after, 4);
-        i.stored_after = after;
+        i.stored_after = store_scalar_word(p, stored, i.raw_data, n.writable_mask);
         if (auto* fn = n.write_callback.get())
             try {
                 (*fn)(stored, i);

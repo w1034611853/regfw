@@ -997,6 +997,9 @@ class RegisterMap {
                                                  const detail::ScalarAccessSite& site,
                                                  const detail::RegViewLayout* layout,
                                                  std::uint64_t target);
+    template <bool Writing, class Log>
+    RegMmioReadResult
+    execute_scalar(Node& node, std::byte* data, detail::ScalarAccessFrame& frame, Log&& log);
     std::optional<RegData> fast_scalar_resolved(Resolution& r, bool writing);
     template <bool Writing, class Selection>
     RegMmioReadResult mapped_scalar(std::uint64_t address, RegData value, const Selection& source);
