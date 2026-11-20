@@ -74,13 +74,11 @@ class FormulaDecoder {
         std::uint64_t dense_base{};
         std::vector<SparseSlot> sparse;
         std::size_t sparse_mask{}, key_count{};
-        static std::size_t hash_key(std::uint64_t key, std::size_t mask) noexcept {
-            // Mix every address bit before masking. Multiplication alone leaves
-            // high-stride arrays clustered when low address bits are identical.
-            key >>= 2;
-            key = (key ^ (key >> 30)) * 0xbf58476d1ce4e5b9ULL;
-            key = (key ^ (key >> 27)) * 0x94d049bb133111ebULL;
-            return static_cast<std::size_t>(key ^ (key >> 31)) & mask;
+        unsigned sparse_shift{};
+        static std::size_t hash_key(std::uint64_t key, unsigned shift) noexcept {
+            // Take the high product bits, so aligned/high-stride addresses are
+            // distributed without a multi-round avalanche on every lookup.
+            return static_cast<std::size_t>(((key >> 2) * 0x9e3779b97f4a7c15ULL) >> shift);
         }
         const PreparedAccessInfo* find(std::uint64_t key) const noexcept {
             if (!dense.empty()) {
@@ -92,7 +90,7 @@ class FormulaDecoder {
             }
             if (sparse.empty())
                 return nullptr;
-            auto slot = hash_key(key, sparse_mask);
+            auto slot = hash_key(key, sparse_shift);
             for (;;) {
                 const auto& entry = sparse[slot];
                 if (entry.key == UINT64_MAX)
@@ -125,15 +123,17 @@ class FormulaDecoder {
             // Load factor <= 1/2 guarantees a vacant sentinel and bounded misses.
             // All installed keys are 4-byte aligned, so UINT64_MAX is unavailable.
             std::size_t capacity = 2;
+            sparse_shift = 63;
             while (capacity / 2 < key_count) {
                 if (capacity > sparse.max_size() / 2)
                     throw Error("sparse entity lookup size overflow", ErrorKind::Configuration);
                 capacity *= 2;
+                --sparse_shift;
             }
             sparse.resize(capacity);
             sparse_mask = capacity - 1;
             for (const auto& [key, access] : words) {
-                auto slot = hash_key(key, sparse_mask);
+                auto slot = hash_key(key, sparse_shift);
                 while (sparse[slot].key != UINT64_MAX)
                     slot = (slot + 1) & sparse_mask;
                 sparse[slot] = {key, access};
