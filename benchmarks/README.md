@@ -1,5 +1,31 @@
 # regfw 性能复测入口
 
+## 紧凑分发数据与初始化（sync）
+
+[本轮实现与测量](../docs/Performance-Compact-Dispatch.md) 使用真实 RegisterBank 的
+`dispatch_layout.cpp`，覆盖多个 View、无关/局部 Reserve、普通/高位稀疏地址及九份实体的
+多个大数组。`poe_init.cpp` 测仓库内 POE 形状的静态 PF/PF_VF/VF 拓扑，分别记录构造、
+finish、Summary/Full 格式化及内存；它不代表私有 QEMU/POE 设备的端到端耗时。
+
+先用相同 Release 配置分别构建两个 SDK 的库，再用当前目录的同份基准构建消费者：
+
+```sh
+python3 benchmarks/build_layout_study.py --sdk /path/to/before \
+  --library /path/to/before-build/libregfw.a --out /tmp/study-before
+python3 benchmarks/build_layout_study.py --sdk /path/to/after \
+  --library /path/to/after-build/libregfw.a --out /tmp/study-after
+# 等待全部构建、功能测试和 sanitizer 退出后再计时。
+python3 benchmarks/measure_layout_study.py --base /tmp/study-before \
+  --candidate /tmp/study-after --out /tmp/study-results \
+  --blocks 4 --iterations 3000000 --cpu 1
+```
+
+构建脚本需要两个匹配版本的 Git 检出及恢复后的 hlog；输出目录须尚不存在。
+`--groups` 可选择 scalar、mapped、dispatch、memory、init、handles；`--cases` 用于
+单项复测。输出保存版本、库与二进制摘要、逐次数据及数值校验。
+共享表统计、`mallinfo2` 分配量及进程峰值 RSS 分别报告。历史 `entityhash_memory.cpp`
+是独立容器实验，不能作为框架实际内存变化的唯一依据。
+
 ## pre_access / 地址分发对照
 
 本文钩子优化报告以无异步的 `cec42e1f3a25bd8804129ff4c349a0dd54128742`（0.37.0）及回移同一优化的版本配对；PR 集成 main 0.38.0。复现时不要混用这两套版本。

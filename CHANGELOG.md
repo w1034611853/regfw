@@ -2,6 +2,14 @@
 
 ## 0.37.0
 
+**Synchronous compact dispatch data (2026-11-20).**
+
+- Keep prepared word entries at 16 bytes and borrow precomputed entity coordinates only when needed. Store coordinates, mapped addresses and diagnostic names separately.
+- Search compact View keys, skip overlap traversal for isolated Views, and check only each selected View's intersecting Reserve indices.
+- Retain the existing sparse hash lookup: the flat-table candidate regressed common sparse layouts, and a cheaper hash clustered on legal strides.
+- Allocate legacy page directories on first insertion, bucket geometry candidates before exact comparison, merge proven contiguous claims, and prune sorted Reserve validation.
+- Preserve public APIs, callback info semantics, layout validation and snapshot format. See [implementation and paired measurements](docs/Performance-Compact-Dispatch.md).
+
 **Synchronous fixed-lifetime performance branch (2026-11-18).**
 
 - Freeze resolver, pre_access and register callback bindings at `finish()`. Keep mutable routing data, logger levels and the existing callback signatures.

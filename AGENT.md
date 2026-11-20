@@ -2,6 +2,8 @@
 
 本分支面向固定生命周期、单线程 QEMU SysBus 设备，基于无异步队列的 0.37。初始化顺序是：建立 bank → 注册全部 identity/index resolver、pre_access、读写/完成回调 → `finish()` → MMIO。`finish()` 同时冻结布局与绑定；之后 set/clear/首次注册均抛 Configuration，`defer_*` 不再允许未绑定依赖通过 finish。函数捕获的路由表、寄存器值及 logger 等级仍可变化，resolver 结果仍逐次求值。
 
+当前字表使用 16B 记录，按需借用实体 `indices`；实体坐标、最终映射地址、名称分开存储。View 搜索使用紧凑键及每 View 的 Reserve 索引切片，稀疏字表保留 unordered_map；平坦开放寻址候选经配对测量后撤回。参见 [紧凑分发数据](docs/Performance-Compact-Dispatch.md)。这些静态结构不缓存 resolver 返回值；不得把局部声明地址与最终映射地址混用。
+
 RegView 只借用实体存储，不持有生命周期计数，也不检测 bank 销毁。使用 view、原生引用及 bridge 时必须保持 bank 存活；移动 bank 保持实体地址。`is_alive()` 仅表示句柄已绑定。框架不再维护 MMIO 重入、entity borrow 或钩子退休保护；同一 map 的 MMIO/save/load 不可在回调中递归进入。这些是本分支的使用前提，不是运行时保护。
 
 流快照 `ar(bank)` / `bank.save(file)` 改为紧凑格式：布局 hash、实际位宽的实体值及活动事务，省去 schema 明细。无参 `bank.save()` 仍返回完整 `VersionedSnapshot` v2，供内存检查与兼容用途。旧版 bank 流不能直接由新版 load 读取，需要重新生成或在旧版解析为 VersionedSnapshot 后显式加载。头文件、库和设备必须配套重编译。详情见 [固定生命周期优化](docs/Performance-Fixed-Lifetime.md) 和 [快照格式](docs/Snapshot.md)。

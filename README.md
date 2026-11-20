@@ -2,6 +2,8 @@
 
 `sync` 是独立的同步优化分支，包含 MMIO、句柄、钩子与紧凑快照优化，不包含 `main` 的异步端点或任务队列。同步设备更新时请检出 `sync`，并配套重编译头文件、库和设备。
 
+本轮字表瘦身、局部 Reserve 分发和初始化整理的实现及验证见 [紧凑分发数据](docs/Performance-Compact-Dispatch.md)。
+
 本分支面向固定生命周期、单线程 QEMU SysBus 设备，基于无异步队列的 0.37。初始化顺序是：建立 bank → 注册全部 identity/index resolver、pre_access、读写/完成回调 → `finish()` → MMIO。`finish()` 同时冻结布局与绑定；之后 set/clear/首次注册均抛 Configuration，`defer_*` 不再允许未绑定依赖通过 finish。函数捕获的路由表、寄存器值及 logger 等级仍可变化，resolver 结果仍逐次求值。
 
 RegView 只借用实体存储，不持有生命周期计数，也不检测 bank 销毁。使用 view、原生引用及 bridge 时必须保持 bank 存活；移动 bank 保持实体地址。`is_alive()` 仅表示句柄已绑定。框架不再维护 MMIO 重入、entity borrow 或钩子退休保护；同一 map 的 MMIO/save/load 不可在回调中递归进入。这些是本分支的使用前提，不是运行时保护。
