@@ -25,7 +25,7 @@ cases = []
 def add(name, binary, args, kind, env=None):
     cases.append(dict(name=name, binary=binary, args=list(map(str, args)), kind=kind, env=env or {}))
 if 'scalar' in a.groups:
-    for mode in ['legacy', 'space']:
+    for mode in ['legacy', 'space', 'alias']:
         for cb in ['none', 'light', 'info', 'copy']:
             for w in [0, 1]:
                 add(f'scalar-{mode}-{cb}-{w}', 'scalar', [256, mode, 1, cb, w, a.iterations, 0], 'scalar')

@@ -25,10 +25,17 @@ static double now() {
     return double(t.tv_sec) + double(t.tv_nsec) * 1e-9;
 }
 template <unsigned N, bool Space>
-void run(
-    bool finish, std::string_view callback, bool write, std::uint64_t iterations, bool logger) {
+void run(std::string_view mode,
+         bool finish,
+         std::string_view callback,
+         bool write,
+         std::uint64_t iterations,
+         bool logger) {
     using Root = std::conditional_t<Space, Views<N>, Registers<N>>;
-    reg::RegisterBank<Root> bank(reg::space(N * 4).name("BENCH"));
+    const auto base = mode == "alias" ? N * 4 : 0;
+    reg::RegisterBank<Root> bank(reg::space(N * 4 + base).name("BENCH"));
+    if (base)
+        bank.map().map_alias_window(base, 0, N * 4, "MIRROR");
     auto& array = [&]() -> auto& {
         if constexpr (Space)
             return bank->regs.VALUES;
@@ -77,13 +84,13 @@ void run(
     for (unsigned i = 0; i < N; ++i)
         array.data()[i] = i + 1;
     auto& map = bank.map();
-    if (map.mmio_read(0) != 1 || !map.mmio_write(0, 1).success())
+    if (map.mmio_read(base) != 1 || !map.mmio_write(base, 1).success())
         std::abort();
     calls = info_sum = 0;
     std::uint64_t sum = 0;
     const auto begin = now();
     for (std::uint64_t i = 0; i < iterations; ++i) {
-        const auto address = ((i * 13) & (N - 1)) * 4;
+        const auto address = base + ((i * 13) & (N - 1)) * 4;
         if (write)
             sum += unsigned(map.mmio_write(address, std::uint32_t(i)).result);
         else
@@ -96,24 +103,25 @@ void run(
         sum += array.data()[i];
     if (callback == "copy")
         info_sum = saved.address + saved.index.linear() + saved.stored_before;
-    std::cout << N << ',' << (Space ? "space" : "legacy") << ',' << finish << ',' << callback << ','
-              << write << ',' << logger << ',' << std::fixed << std::setprecision(4)
-              << elapsed * 1e9 / iterations << ',' << sum << ',' << calls << ',' << info_sum
-              << '\n';
+    std::cout << N << ',' << mode << ',' << finish << ',' << callback << ',' << write << ','
+              << logger << ',' << std::fixed << std::setprecision(4) << elapsed * 1e9 / iterations
+              << ',' << sum << ',' << calls << ',' << info_sum << '\n';
 }
 int main(int argc, char** argv) {
     if (argc != 7 && argc != 8)
         return 2;
     const bool logger = argc == 8 && std::atoi(argv[7]);
     const auto n = std::strtoul(argv[1], nullptr, 10);
-    const bool space = std::string_view(argv[2]) == "space";
+    const std::string_view mode = argv[2];
+    if (mode != "space" && mode != "legacy" && mode != "alias")
+        return 2;
     const bool finish = std::atoi(argv[3]), write = std::atoi(argv[5]);
     const auto iterations = std::strtoull(argv[6], nullptr, 10);
     auto select = [&]<unsigned N>() {
-        if (space)
-            run<N, true>(finish, argv[4], write, iterations, logger);
+        if (mode == "space")
+            run<N, true>(mode, finish, argv[4], write, iterations, logger);
         else
-            run<N, false>(finish, argv[4], write, iterations, logger);
+            run<N, false>(mode, finish, argv[4], write, iterations, logger);
     };
     if (n == 4)
         select.template operator()<4>();

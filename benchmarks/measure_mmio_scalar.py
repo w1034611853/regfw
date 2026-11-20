@@ -27,7 +27,7 @@ binaries = {"baseline": args.baseline.resolve(), "candidate": args.candidate.res
 if args.control:
     binaries["control"] = args.control.resolve()
 cases = [(256, mode, 1, cb, w, logger)
-         for mode in ("legacy", "space") for cb in ("none", "light", "info", "copy")
+         for mode in ("legacy", "space", "alias") for cb in ("none", "light", "info", "copy")
          for w in (0, 1) for logger in ((0,) if args.quick else (0, 1))]
 if not args.quick:
     cases += [(n, mode, 1, cb, w, 0) for n in (4, 4096) for mode in ("legacy", "space")
