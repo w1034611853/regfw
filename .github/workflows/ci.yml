@@ -2,7 +2,7 @@ name: C++20 SDK verification
 
 on:
   push:
-    branches: [main, codex/regfw-037-single-thread-fastpath-20261117, codex/regfw-037-mmio-callbacks-20261118, codex/regfw-037-fixed-lifetime-20261118]
+    branches: [main, sync, codex/regfw-037-single-thread-fastpath-20261117, codex/regfw-037-mmio-callbacks-20261118, codex/regfw-037-fixed-lifetime-20261118]
   pull_request:
 
 jobs:
