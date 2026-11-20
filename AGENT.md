@@ -16,6 +16,8 @@ RegView 只借用实体存储，不持有生命周期计数，也不检测 bank 
 
 普通 scalar 回调借用挂载时准备的元数据；无参回调跳过 info 构造，其余回调在模板适配器中按实际使用优化。完整 info 的字段及复制语义不变。index resolver 的帧入口仅由 mapped 执行器调用，直接构造 mapped info，避免混入 scalar 装配影响优化。直接根 Bundle 在 finish 后、无 alias/identity/reserve/入口策略/instance window 时也可使用 scalar 执行器；不自动 finalize，不缓存动态钩子或 logger 开关。
 
+普通和 mapped 的 32 位 RW 快路径在选定实体并取值后共用存储和回调执行。resolver 与 pre_access 之间的取值时点仍由 mapped 路径控制。标量读源、事件和 index resolver 共用内联回调存储，每组调用入口使用同一个闭包。见 [第二阶段测量](docs/Performance-Compact-Dispatch.md#同步执行与回调存储)。
+
 当前生产后端是 **View Range → Shared EntityLayout Dense/Hash → Prepared AccessInfo → Existing Access Engine**。`REG_LAYOUT` 接口、REG DSL、MMIO、Resolver/PreAccess、Transaction、Callbacks、Snapshot、Reset 均保持原有行为。运行时的几何计划仅构建一次（按布局类型的函数局部静态对象）；每个 Bank 安装独立的 Entity storage 与访问上下文，共享 View 内地址映射形状。
 
 已移除完整布局的 `consteval` 两遍 FormulaPlan、编译期稀疏元素排序以及旧 Zone/Run/PageDirectory 查找。构建期只保留单个声明类型的宽度、dims、strides 等轻量 constexpr 信息。不要重新引入逐 word `consteval` 输出或多级缓存。

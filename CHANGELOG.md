@@ -2,6 +2,12 @@
 
 ## 0.37.0
 
+**Synchronous scalar execution and callback storage.**
+
+- Skip temporary per-element addresses when validating a contiguous register claim.
+- Share the final 32-bit read and write execution between ordinary and mapped access.
+- Store scalar read and index resolver callables in the same inline storage implementation as event callbacks. Full and lightweight calls share the same captured object.
+
 **Synchronous compact dispatch data (2026-11-20).**
 
 - Keep prepared word entries at 16 bytes and borrow precomputed entity coordinates only when needed. Store coordinates, mapped addresses and diagnostic names separately.
