@@ -87,12 +87,28 @@ void index_binding() {
     late.finish();
     CHECK(late.map().mmio_write(0, 19).success() && late->VALUE.at(0).ref() == 19);
 }
+REG_ACCESS_FIELD(IdentityRoute, std::uint32_t);
+struct IdentityWord : reg::RegEntityBundle {
+    REG_BUNDLE(IdentityWord);
+    REG(VALUE, std::uint32_t, reg::at(0));
+};
+struct IdentityIO : reg::Bundle {
+    REG_BUNDLE(IdentityIO);
+    REG_REPEAT_ENTITY(vf, IdentityWord, 2);
+    REG_LAYOUT([&] {
+        return reg::address_space("IO").map_repeat(
+            "VFS", 0, reg::repeat(2).stride(0x100), [&](auto i) {
+                return reg::view("VF", 0x100).map(vf[i]).identity(7).using_resolver(IdentityRoute);
+            });
+    });
+};
 void identity_failure() {
-    reg::RegisterMap map(0x200, "IDENTITY");
-    auto first = map.create_reg<std::uint32_t>(0, "FIRST", reg::at(0).reset(11));
-    auto second = map.create_reg<std::uint32_t>(0x100, "SECOND", reg::at(0).reset(22));
-    reg::RegLayout layout(map);
-    layout.identity_repeat_window({0, 2, 0x100, 0x100}, 7, reg::IdentityRemapMode::RedirectBank);
+    reg::RegisterBank<IdentityIO> bank(reg::space(0x200).name("IDENTITY"));
+    auto& map = bank.map();
+    auto& first = bank->vf[0].VALUE;
+    auto& second = bank->vf[1].VALUE;
+    first.ref() = 11;
+    second.ref() = 22;
     configuration_error(
         [&] {
             map.finalize();
@@ -106,7 +122,7 @@ void identity_failure() {
     second.on_write([&] {
         ++events;
     });
-    map.set_identity_resolver([&](const auto& request) {
+    map.set_identity_resolver(IdentityRoute, [&](const auto& request) {
         ++calls;
         if (mode == 1)
             throw std::runtime_error("route table broken");
@@ -141,29 +157,27 @@ void identity_failure() {
     CHECK(map.mmio_write(0, 33).result == reg::RegMemTxResult::DeviceError);
     configuration_error(
         [&] {
-            map.clear_identity_resolver();
+            map.clear_identity_resolver(IdentityRoute);
         },
         "frozen");
     CHECK(map.try_mmio_read_sized(0, 4).result == reg::RegMemTxResult::DeviceError);
     CHECK(map.dump_state_versioned().data == before.data && events == 0);
 
-    reg::RegisterMap late(0x100, "LATE_IDENTITY");
-    auto reg = late.create_reg<std::uint32_t>(0, "VALUE");
-    reg::RegLayout late_layout(late);
-    late_layout.identity_repeat_window(
-        {0, 1, 0x100, 0x100}, 7, reg::IdentityRemapMode::RedirectBank);
-    late.defer_identity_resolver();
+    reg::RegisterBank<IdentityIO> unbound(reg::space(0x200).name("LATE_IDENTITY"));
+    auto& late = unbound.map();
+    auto& value_reg = unbound->vf[0].VALUE;
+    late.defer_identity_resolver(IdentityRoute);
     configuration_error(
         [&] {
             late.finalize();
         },
         "identity");
     CHECK(late.mmio_write(0, 9).result == reg::RegMemTxResult::DeviceError);
-    late.set_identity_resolver([](const auto& request) {
+    late.set_identity_resolver(IdentityRoute, [](const auto& request) {
         return request.request_id;
     });
     late.finalize();
-    CHECK(late.mmio_write(0, 9).success() && reg.ref() == 9);
+    CHECK(late.mmio_write(0, 9).success() && value_reg.ref() == 9);
 }
 void failed_request_log() {
     auto* logger = hlog_register_logger("resolver_safety", "errors", HLOG_LEVEL_ERROR);

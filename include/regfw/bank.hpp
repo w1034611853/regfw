@@ -84,6 +84,8 @@ class RegisterBank {
                   map, 0, spec.size_bytes, spec.root_name.value_or(spec.map_name), spec.scope))) {
             if (spec.finalize_on_build)
                 map.finalize();
+            else if (map.mapped_view_count())
+                map.install_default_layout();
         }
     };
     std::unique_ptr<State> state_;

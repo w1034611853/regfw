@@ -1223,7 +1223,7 @@ C bridge 不提供锁、发起 vCPU ID、设备时钟、DMA、IRQ 或事务调�
 | `REG_GROUP` / `REG_REPEAT_GROUP` | 旧式有地址嵌套组 |
 | `REG_LAYOUT(.views=...,.aliases=...,.identities=...,.reserved=...)` | 旧式并列表布局 |
 | `reg::view(source).to(target)` / `reg::alias(source).to(target)` | 旧式映射构建器 |
-| `RegLayout` / `RegScope` | 低级/旧式构建入口 |
+| `RegScope` | 低级实体构建入口。地址组合使用 `AddressSpace` |
 | `reg::init_bank(unique_ptr<RegisterMap>&,unique_ptr<Root>&,spec)` | 管理既有两个指针成员；两者初始必须为空 |
 | `map.create_reg<T>(address,name,spec)` | 直接创建有地址的单 REG，用于小测试/底层适配 |
 

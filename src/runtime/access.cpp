@@ -11,22 +11,6 @@ std::uint64_t RegisterMap::checked_map_size(std::uint64_t size) {
     return size;
 }
 
-std::optional<std::uint32_t> RegisterMap::source_instance(std::uint64_t address) const {
-    for (auto it = instances_.rbegin(); it != instances_.rend(); ++it)
-        if (address >= it->base && address - it->base < it->size)
-            return it->instance;
-    return {};
-}
-
-const detail::AddressWindow* RegisterMap::window_at(std::uint64_t address) const {
-    const detail::AddressWindow* best = nullptr;
-    for (const auto& w : windows_)
-        if (address >= w.source_base && address - w.source_base < w.size &&
-            (!best || w.size < best->size))
-            best = &w;
-    return best;
-}
-
 void RegisterMap::require_initialized() const {
     if (!size_)
         throw Error("register map has not been initialized", ErrorKind::Configuration);
@@ -49,71 +33,10 @@ void RegisterMap::region_check(std::uint64_t base, std::uint64_t n) const {
         throw Error("invalid/out-of-range 4-byte-aligned region", ErrorKind::Configuration);
 }
 
-RegisterMap::AliasEntry
-RegisterMap::walk_alias(std::uint64_t original, unsigned size, std::vector<AliasHop>* hops) const {
-    AliasEntry out;
-    out.target = original;
-    out.available = size_ - original;
-    out.instance = source_instance(original);
-    std::array<std::uint64_t, 32> visited{};
-    unsigned depth = 0;
-    for (;;) {
-        for (unsigned j = 0; j < depth; ++j)
-            if (visited[j] == out.target)
-                throw Error("alias cycle", ErrorKind::Decode);
-        if (depth)
-            out.policy = out.policy.intersect(view_policy(out.target, size));
-        auto* w = window_at(out.target);
-        if (!w)
-            return out;
-        if (depth == visited.size())
-            throw Error("alias depth exceeded", ErrorKind::Decode);
-        visited[depth++] = out.target;
-        auto remaining = w->size - (out.target - w->source_base);
-        for (const auto& child : windows_)
-            if (child.source_base > out.target && child.source_base < w->source_base + w->size)
-                remaining = std::min(remaining, child.source_base - out.target);
-        if (size > remaining)
-            throw Error("access crosses alias window", ErrorKind::Decode);
-        out.available = std::min(out.available, remaining);
-        if (!out.used)
-            out.name = w->name;
-        if (!w->terminal)
-            out.used = true;
-        if (out.route.is_direct())
-            out.route = w->route;
-        out.policy = out.policy.intersect(w->policy);
-        if (!out.instance && !w->route.is_direct() && w->route.kind != AccessRouteKind::Alias)
-            out.instance = w->route.instance;
-        if (w->mapped_offsets) {
-            const auto offset = out.target - w->source_base;
-            const auto& ranges = *w->mapped_offsets;
-            auto it = std::upper_bound(
-                ranges.begin(), ranges.end(), offset, [](auto value, const auto& r) {
-                    return value < r.first;
-                });
-            out.defined =
-                it != ranges.begin() && offset - std::prev(it)->first < std::prev(it)->second;
-        }
-        if (hops)
-            hops->push_back(
-                {out.target,
-                 w->terminal ? out.target : w->target_base + (out.target - w->source_base),
-                 w});
-        if (w->terminal)
-            return out;
-        out.target = w->target_base + (out.target - w->source_base);
-        // A typed entity mapping ends at stored bytes. Other windows
-        // attached to the first address entrance are not part of it.
-        if (w->mapped_offsets)
-            return out;
-    }
-}
-
 RegisterMap::AliasEntry RegisterMap::resolve_static(std::uint64_t address, unsigned size) const {
     if (formula_) {
-        if (auto* p = formula_->decode(address, access_scratch_->decoded[0])) {
-            auto out = *p;
+        AliasEntry out;
+        if (formula_->decode(address, out)) {
             const auto lane = address & 3;
             if (lane >= out.available || size > out.available - lane)
                 throw Error("access crosses selected view target", ErrorKind::Decode);
@@ -121,35 +44,10 @@ RegisterMap::AliasEntry RegisterMap::resolve_static(std::uint64_t address, unsig
             out.available -= lane;
             return out;
         }
-        AliasEntry hole;
-        hole.compiled = true;
-        hole.target = address;
-        hole.available = size_ - address;
-        hole.defined = false;
-        return hole;
     }
-    if (finalized_) {
-        if (auto p = aliases_.get(address)) {
-            auto out = *p;
-            auto lane = address & 3;
-            if (size > out.available - lane)
-                throw Error("access crosses alias window", ErrorKind::Decode);
-            out.target += lane;
-            out.available -= lane;
-            return out;
-        }
-        AliasEntry out;
-        out.target = address;
-        out.available = size_ - address;
-        if (auto p = lookup_.get(address)) {
-            out.instance = p->source_instance;
-            return out;
-        }
-        // Only aliases ending at stored registers are cached. Holes and
-        // decoded command ranges use the original window resolver.
-        return walk_alias(address, size);
-    }
-    return walk_alias(address, size);
+    AliasEntry hole;
+    hole.target = address;
+    return hole;
 }
 
 REGFW_DETAIL_ALWAYS_INLINE inline AccessIdentity
@@ -173,92 +71,39 @@ RegisterMap::resolve_identity(const detail::IdentityWindow& window,
         window.domain, request.request_id, id, window.mode, request.source, window.trace_labels};
 }
 
-RegisterMap::AddressResolution RegisterMap::resolve_metadata(std::uint64_t address, unsigned size) {
+std::tuple<std::uint64_t, AccessRoute, std::optional<AccessIdentity>>
+RegisterMap::resolve_address_with_identity(std::uint64_t address, unsigned size) {
     if (!RegisterAccessWidthPolicy::size_bit(size) || (address & (size - 1)))
         throw Error("invalid/unaligned access", ErrorKind::Unsupported);
     if (address >= size_ || size > size_ - address) {
         require_initialized();
         throw Error("address outside map", ErrorKind::Decode);
     }
-    auto alias = resolve_static(address, size);
-    if (!alias.compiled)
-        alias.policy = alias.policy.intersect(view_policy(address, size));
-    auto alias_address = alias.target;
-    auto hint = alias.instance;
-    if (!alias.compiled && !hint)
-        if (auto p = lookup_.get(address))
-            hint = p->source_instance;
-    std::optional<AccessIdentity> identity;
-    const detail::IdentityWindow* hit = nullptr;
-    std::pair<std::uint32_t, std::uint64_t> match{};
-    IdentityAddressSource source = IdentityAddressSource::Bus;
-    if (alias.compiled && alias.identity_index) {
-        const auto& w = identities_.at(*alias.identity_index);
-        if (auto m = w.match(address, size, hint)) {
-            hit = &w;
-            match = *m;
+    const auto source = resolve_static(address, size);
+    if (source.identity_index) {
+        const auto& w = identities_[*source.identity_index];
+        if (auto match = w.match(address, size, source.instance)) {
+            auto identity = resolve_identity(w,
+                                             {w.domain,
+                                              match->first,
+                                              address,
+                                              source.target,
+                                              match->second,
+                                              static_cast<std::uint8_t>(size),
+                                              source.route,
+                                              IdentityAddressSource::Bus});
+            if (w.mode == IdentityRemapMode::RedirectBank) {
+                const auto bus =
+                    w.base + std::uint64_t(identity.resolved_id) * w.stride + match->second;
+                const auto target = resolve_static(bus, size);
+                return {target.target,
+                        source.route.is_direct() ? target.route : source.route,
+                        identity};
+            }
+            return {source.target, source.route, identity};
         }
     }
-    if (!alias.compiled)
-        for (auto& w : identities_)
-            if (auto m = w.match(address, size, hint)) {
-                hit = &w;
-                match = *m;
-                break;
-            }
-    const bool tree_entrance =
-        alias.compiled ||
-        std::any_of(view_policies_.begin(), view_policies_.end(), [&](const auto& w) {
-            return address >= w.base && address - w.base < w.size;
-        });
-    if (!hit && alias.target != address && !tree_entrance) {
-        std::optional<std::uint32_t> ch;
-        if (auto p = lookup_.get(alias.target))
-            ch = p->source_instance;
-        for (auto& w : identities_)
-            if (auto m = w.match(alias.target, size, ch)) {
-                hit = &w;
-                match = *m;
-                source = IdentityAddressSource::Canonical;
-                break;
-            }
-    }
-    if (hit) {
-        identity = resolve_identity(*hit,
-                                    {hit->domain,
-                                     match.first,
-                                     address,
-                                     alias.target,
-                                     match.second,
-                                     static_cast<std::uint8_t>(size),
-                                     alias.route,
-                                     source});
-        if (hit->mode == IdentityRemapMode::RedirectBank) {
-            const auto bus =
-                hit->base + std::uint64_t(identity->resolved_id) * hit->stride + match.second;
-            auto target = resolve_static(bus, size);
-            if (alias.route.is_direct())
-                alias.route = target.route;
-            alias.policy = alias.policy.intersect(target.policy);
-            if (!target.compiled)
-                alias.policy = alias.policy.intersect(view_policy(bus, size));
-            if (!alias.instance)
-                alias.instance = hint ? hint : std::optional(match.first);
-            alias.used |= target.used;
-            if (alias.name.empty())
-                alias.name = target.name;
-            alias.target = target.target;
-            alias.defined = target.defined;
-            alias.target_entry = target.target_entry;
-            alias.available = target.available;
-            alias.pre_access_chain = target.pre_access_chain;
-            if (target.compiled) {
-                alias.view_name = target.view_name;
-                alias.priority = target.priority;
-            }
-        }
-    }
-    return {alias, identity, alias_address};
+    return {source.target, source.route, std::nullopt};
 }
 
 // Access context: resolve a local/banked address before executing callbacks.
@@ -273,117 +118,72 @@ RegisterMap::Resolution& RegisterMap::resolve(std::uint64_t address,
         require_initialized();
         throw Error("address outside map", ErrorKind::Decode);
     }
-    if (formula_) {
-        const auto* source = selected;
-        if (!source)
-            source = formula_->decode(address, access_scratch_->decoded[0]);
-        if (!source)
-            throw Error("unmapped entity view address", ErrorKind::Decode);
-        if (source->identity_index)
-            return resolve_plan<2>(address, size, kind, value, source);
-        return resolve_plan<1>(address, size, kind, value, source);
-    }
-    return resolve_plan<0>(address, size, kind, value, nullptr);
+    if (!selected && formula_)
+        selected = formula_->decode(address, access_scratch_->decoded[0]);
+    if (!selected)
+        throw Error("unmapped entity view address", ErrorKind::Decode);
+    return resolve_plan(address, size, kind, value, *selected);
 }
 
-template <unsigned Mode>
 RegisterMap::Resolution& RegisterMap::resolve_plan(std::uint64_t address,
                                                    unsigned size,
                                                    RegTransactionKind kind,
                                                    RegData value,
-                                                   const AliasEntry* selected) {
+                                                   const AliasEntry& source) {
     auto& out = access_scratch_->resolution;
     auto& alias = out.alias;
     auto& identity = out.identity;
     identity.reset();
-    std::uint64_t alias_address;
-    const Entry* p{};
-    std::optional<std::uint32_t> instance;
-    std::string_view view_name;
-    bool used = false, compiled = false;
-    if constexpr (Mode != 0) {
-        const auto* source = selected;
-        if (!source)
-            throw Error("unmapped entity view address", ErrorKind::Decode);
-        const auto lane = address & 3;
-        if (lane >= source->available || size > source->available - lane)
-            throw Error("access crosses selected view target", ErrorKind::Decode);
-        const auto* target = source;
-        auto target_lane = lane;
-        alias.target = source->target + lane;
-        alias_address = alias.target;
-        alias.route = source->route;
-        alias.policy = source->policy;
-        instance = source->instance;
-        used = source->used;
-        if constexpr (Mode == 2) {
-            const auto& w = identities_.at(*source->identity_index);
-            if (auto match = w.match(address, size, instance)) {
-                identity = resolve_identity(w,
-                                            {w.domain,
-                                             match->first,
-                                             address,
-                                             alias.target,
-                                             match->second,
-                                             static_cast<std::uint8_t>(size),
-                                             alias.route,
-                                             IdentityAddressSource::Bus});
-                if (w.mode == IdentityRemapMode::RedirectBank) {
-                    const auto address2 =
-                        w.base + std::uint64_t(identity->resolved_id) * w.stride + match->second;
-                    target = formula_->decode(address2, access_scratch_->decoded[1]);
-                    if (!target)
-                        throw Error("unmapped entity view address", ErrorKind::Decode);
-                    target_lane = address2 & 3;
-                    if (target_lane >= target->available || size > target->available - target_lane)
-                        throw Error("access crosses selected view target", ErrorKind::Decode);
-                    if (alias.route.is_direct())
-                        alias.route = target->route;
-                    alias.policy = alias.policy.intersect(target->policy);
-                    if (!instance)
-                        instance = match->first;
-                    used |= target->used;
-                    alias.target = target->target + target_lane;
-                }
+    auto lane = address & 3;
+    if (lane >= source.available || size > source.available - lane)
+        throw Error("access crosses selected view target", ErrorKind::Decode);
+    const auto alias_address = source.target + lane;
+    const auto* target = &source;
+    alias = {alias_address, source.route, source.policy, source.pre_access_chain};
+    auto instance = source.instance;
+    bool used = source.used;
+    if (source.identity_index) {
+        const auto& w = identities_[*source.identity_index];
+        if (auto match = w.match(address, size, instance)) {
+            identity = resolve_identity(w,
+                                        {w.domain,
+                                         match->first,
+                                         address,
+                                         alias.target,
+                                         match->second,
+                                         static_cast<std::uint8_t>(size),
+                                         alias.route,
+                                         IdentityAddressSource::Bus});
+            if (w.mode == IdentityRemapMode::RedirectBank) {
+                const auto bus =
+                    w.base + std::uint64_t(identity->resolved_id) * w.stride + match->second;
+                target = formula_->decode(bus, access_scratch_->decoded[1]);
+                if (!target)
+                    throw Error("unmapped entity view address", ErrorKind::Decode);
+                lane = bus & 3;
+                if (lane >= target->available || size > target->available - lane)
+                    throw Error("access crosses selected view target", ErrorKind::Decode);
+                if (alias.route.is_direct())
+                    alias.route = target->route;
+                alias.policy = alias.policy.intersect(target->policy);
+                if (!instance)
+                    instance = match->first;
+                used |= target->used;
+                alias.target = target->target + lane;
+                alias.pre_access_chain = target->pre_access_chain;
             }
         }
-        if (!target->defined)
-            throw Error("unmapped entity view address", ErrorKind::Decode);
-        alias.pre_access_chain = target->pre_access_chain;
-        view_name = target->view_name;
-        compiled = target->compiled;
-        p = target->target_entry ? &*target->target_entry : lookup_.get(alias.target);
-    } else {
-        auto metadata = resolve_metadata(address, size);
-        const auto& a = metadata.alias;
-        alias = {a.target, a.route, a.policy, a.pre_access_chain};
-        identity = metadata.identity;
-        alias_address = metadata.alias_address;
-        instance = a.instance;
-        used = a.used;
-        view_name = a.view_name;
-        compiled = a.compiled;
-        if (!a.defined)
-            throw Error("unmapped entity view address", ErrorKind::Decode);
-        // The legacy metadata owns its Entry; copy it before metadata dies.
-        out.entry = a.target_entry ? *a.target_entry : Entry{};
-        p = a.target_entry ? &out.entry : lookup_.get(a.target);
     }
-    if (!p)
-        throw Error("unmapped register address", ErrorKind::Decode);
-    auto e = *p;
+    auto e = target->target_entry;
     auto& n = *e.node;
     if (size == 8) {
-        auto hi = compiled ? nullptr : lookup_.get(alias.target + 4);
-        if (alias.target % 8 || e.byte_offset + 8 > n.value_size ||
-            (!compiled && (!hi || hi->node != e.node || hi->linear != e.linear ||
-                           hi->byte_offset != e.byte_offset + 4)))
+        if (alias.target % 8 || e.byte_offset + 8 > n.value_size)
             throw Error("invalid 64-bit access pair", ErrorKind::Unsupported);
     } else {
-        auto lane = unsigned(alias.target & 3);
-        if (lane + size > 4)
+        const auto target_lane = unsigned(alias.target & 3);
+        if (target_lane + size > 4)
             throw Error("access crosses lookup word", ErrorKind::Unsupported);
-        e.byte_offset += lane;
+        e.byte_offset += target_lane;
     }
     out.entry = e;
     auto& i = out.info;
@@ -391,15 +191,13 @@ RegisterMap::Resolution& RegisterMap::resolve_plan(std::uint64_t address,
     i.access_group = {};
     i.wide_values = nullptr;
     i.kind = kind;
-    i.view_path = view_name;
+    i.view_path = target->view_name;
     i.address = address;
     i.alias_resolved_address = alias_address;
     i.resolved_address = alias.target;
     i.size = static_cast<std::uint8_t>(size);
     i.internal_byte_offset = static_cast<std::uint8_t>(e.byte_offset);
-    const auto& coordinates =
-        e.precomputed_index ? *e.precomputed_index : e.view->indices[e.linear];
-    detail::copy_index(i.request_index, coordinates);
+    detail::copy_index(i.request_index, e.view->indices[e.linear]);
     detail::copy_index(i.index, i.request_index);
     i.raw_data = kind == RegTransactionKind::Write ? value & detail::low_mask(size * 8) : 0;
     i.register_width_bits = n.value_size * 8;
@@ -408,7 +206,7 @@ RegisterMap::Resolution& RegisterMap::resolve_plan(std::uint64_t address,
     i.stored_before = i.stored_after = n.read_scalar(e.linear);
     i.route = alias.route;
     i.alias_access_policy = alias.policy;
-    i.source_instance = instance ? instance : e.source_instance;
+    i.source_instance = instance ? instance : target->instance;
     i.is_alias = used;
     if (identity) {
         i.request_identity = identity->request_id;
@@ -1139,55 +937,6 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
     return execute_scalar<Writing>(n, p, frame, log);
 }
 
-std::optional<RegData> RegisterMap::fast_scalar_resolved(Resolution& r, bool writing) {
-    const auto& e = r.entry;
-    auto& n = *e.node;
-    if (r.info.size != 4 || e.byte_offset || !(n.scalar32_directions & (writing ? 2 : 1)) ||
-        pre_access_ || r.alias.pre_access_chain)
-        return {};
-    if (access_log_level(n) != HLOG_LEVEL_OFF)
-        return {};
-    auto& i = r.info;
-    auto* p = n.scalar_data + std::size_t(e.linear) * n.scalar_stride;
-    std::uint32_t stored;
-    std::memcpy(&stored, p, 4);
-    // Resolvers may update storage. Sample again at the same point as
-    // the complete path, after validation/derivation and before behavior.
-    i.stored_before = i.stored_after = stored;
-    if (writing) {
-        i.stored_after = store_scalar_word(p, stored, i.raw_data, n.writable_mask);
-        if (auto* fn = n.write_callback.get())
-            try {
-                (*fn)(stored, i);
-            } catch (...) {
-                log_error("on_write", n.name, &i);
-            }
-        return RegData{};
-    }
-    if (!n.read_callback && !n.read_complete_callback)
-        return RegData(stored);
-    RegData returned = stored;
-    bool source_ok = true;
-    if (auto* fn = n.read_callback.get())
-        try {
-            returned = (*fn)(returned, i) & 0xffffffff;
-        } catch (...) {
-            log_error("on_read", n.name, &i);
-            returned = REG_READ_CALLBACK_ERROR_MAGIC & 0xffffffff;
-            source_ok = false;
-        }
-    // The read callback may have changed the log level.
-    access_log(r, returned);
-    if (source_ok)
-        if (auto* fn = n.read_complete_callback.get())
-            try {
-                (*fn)(returned, i);
-            } catch (...) {
-                log_error("on_read_complete", n.name, &i);
-            }
-    return returned;
-}
-
 template <bool Writing>
 REGFW_DETAIL_ALWAYS_INLINE inline std::optional<RegMmioReadResult> RegisterMap::try_fast_mmio(
     std::uint64_t address, RegData value, unsigned size, const AliasEntry*& selected) {
@@ -1195,51 +944,26 @@ REGFW_DETAIL_ALWAYS_INLINE inline std::optional<RegMmioReadResult> RegisterMap::
         return {};
 
     detail::FormulaDecoder::PreparedHit hit;
-    Node* node = nullptr;
-    std::uint32_t linear;
-    const detail::ScalarAccessSite* site;
-    const detail::RegViewLayout* layout;
-    auto target = address;
-    if (formula_) {
-        if (!formula_->find_prepared(address, hit))
-            return {};
-        const auto& context = *hit.context;
-        using Path = detail::FormulaDecoder::Path;
-        const auto path = Writing ? context.write_path : context.read_path;
-        if (path == Path::Mapped)
-            return mapped_scalar<Writing>(address, value, hit);
-        if (path == Path::Scalar) {
-            node = context.node;
-            linear = context.binding->linear + hit.access->linear;
-            site = &context;
-            layout = context.node_layout;
-            target = hit.canonical(address);
-        }
-    } else {
-        if (!direct_scalar_mode_ || pre_access_)
-            return {};
-        const auto* entry = lookup_.get(address);
-        if (!entry || entry->byte_offset)
-            return {};
-        node = entry->node;
-        if (!(node->scalar32_directions & (Writing ? 2 : 1)) || !node->derivations.empty())
-            return {};
-        auto& direct = access_scratch_->direct_site;
-        direct.instance = entry->source_instance;
-        site = &direct;
-        linear = entry->linear;
-        layout = entry->view;
-    }
-    if (node)
-        if (auto result =
-                fast_scalar<Writing>(address, value, *node, linear, *site, layout, target))
+    if (!formula_->find_prepared(address, hit))
+        return {};
+    const auto& context = *hit.context;
+    using Path = detail::FormulaDecoder::Path;
+    const auto path = Writing ? context.write_path : context.read_path;
+    if (path == Path::Mapped)
+        return mapped_scalar<Writing>(address, value, hit);
+    if (path == Path::Scalar)
+        if (auto result = fast_scalar<Writing>(address,
+                                               value,
+                                               *context.node,
+                                               context.binding->linear + hit.access->linear,
+                                               context,
+                                               context.node_layout,
+                                               hit.canonical(address)))
             return result;
-    if (hit.context) {
-        // A generic access (including enabled access logging) reuses the initial hit.
-        auto& entry = access_scratch_->decoded[0];
-        formula_->fill_prepared(hit, address, entry);
-        selected = &entry;
-    }
+    // A generic access (including enabled logging) reuses the initial hit.
+    auto& entry = access_scratch_->decoded[0];
+    formula_->fill_prepared(hit, address, entry);
+    selected = &entry;
     return {};
 }
 
@@ -1273,8 +997,6 @@ RegisterMap::try_mmio_write_sized(std::uint64_t address, RegData value, unsigned
             return write_wide(r);
         if (auto error = prepare(r))
             return {*error};
-        if (fast_scalar_resolved(r, true))
-            return {};
         if (!pre(r))
             return {RegMemTxResult::Ignored};
         auto index = r.entry.linear;
@@ -1329,8 +1051,6 @@ RegMmioReadResult RegisterMap::try_mmio_read_sized(std::uint64_t address, unsign
             return read_wide(r);
         if (auto error = prepare(r))
             return {invalid, *error};
-        if (auto fast = fast_scalar_resolved(r, false))
-            return {*fast};
         if (!pre(r))
             return {REG_READ_CALLBACK_ERROR_MAGIC & detail::low_mask(size * 8), RegMemTxResult::Ok};
         auto index = r.entry.linear;

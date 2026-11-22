@@ -245,13 +245,13 @@ class ViewCompiler {
     }
     // Resolve static region composition once. Runtime entries carry the selected
     // entity directly; a physical address is never used as a storage identity.
-    void compile_views() {
-        bool legacy = false;
-        map_.lookup_.for_each([&](auto, const auto&) {
-            legacy = true;
-        });
-        if (legacy || map_.formula_)
-            fail("AddressSpace requires a fresh storage-only entity layout");
+    void compile_views(bool implicit_root) {
+        if (map_.formula_ ||
+            (!implicit_root && std::any_of(map_.nodes_.begin(), map_.nodes_.end(), [](auto* node) {
+                return node->layout().mapped;
+            })))
+            fail("AddressSpace requires a fresh storage-only entity map");
+
         for (std::size_t id = 0; id < flat_.size(); ++id) {
             const auto& f = flat_[id];
             for (const auto& e : f.elements) {
@@ -339,7 +339,6 @@ class ViewCompiler {
                                                  f.window->repeat_stride_,
                                                  f.window->repeat_index_);
             auto& scope = map_.layout_scopes_[f.scope];
-            scope.recursive_window = true;
             scope.purpose = f.window->use_ == Use::Reserved ? "RESERVED" : "VIEW";
             if (f.window->use_ == Use::Mapping) {
                 const auto& target = f.window->target_;
@@ -661,7 +660,8 @@ class ViewCompiler {
                                  std::move(formula_arrays),
                                  std::move(record_tables),
                                  std::move(formula_reserves),
-                                 &warnings);
+                                 &warnings,
+                                 implicit_root);
         for (auto& [node, c] : canonical_) {
             auto& layout = node->layout();
             for (std::size_t k = 0; k < c.owners.size(); ++k)
@@ -707,12 +707,26 @@ class ViewCompiler {
   public:
     explicit ViewCompiler(RegisterMap& map) : map_(map) {
     }
-    void install(const ViewDescription& root) {
+    void install(const ViewDescription& root, bool implicit_root = false) {
         map_.mutable_layout();
         auto bounded = root;
         bounded.size_ = map_.size_;
         flatten(bounded, 0, map_.size_, none, map_.name_prefix, {});
-        compile_views();
+        compile_views(implicit_root);
+    }
+    void install_default() {
+        auto root =
+            ViewDescription(map_.name_prefix.empty() ? "<map>" : map_.name_prefix).size(map_.size_);
+        for (auto* node : map_.nodes_)
+            if (node->layout().mapped)
+                root.target_.nodes.push_back(node);
+        if (!root.target_.nodes.empty()) {
+            root.use_ = Use::Mapping;
+            root.target_.owner = &map_;
+            root.target_.lifetime = map_.lifetime();
+            root.target_.name = root.name_;
+        }
+        install(root, true);
     }
 };
 } // namespace detail
@@ -721,17 +735,9 @@ void apply_layout(RegisterMap& map, const AddressSpace& space) {
     detail::ViewCompiler(map).install(space.root_);
 }
 
-AliasAccessPolicy RegisterMap::view_policy(std::uint64_t address, unsigned size) const {
-    auto policy = AliasAccessPolicy::READ_WRITE;
-    for (const auto& w : view_policies_) {
-        if (address >= w.base && address - w.base < w.size) {
-            if (size > w.size - (address - w.base))
-                throw Error("access crosses sub_window boundary", ErrorKind::Decode);
-            policy = policy.intersect(w.policy);
-        } else if (w.base > address && w.base - address < size)
-            throw Error("access crosses sub_window boundary", ErrorKind::Decode);
-    }
-    return policy;
+void RegisterMap::install_default_layout() {
+    if (!formula_)
+        detail::ViewCompiler(*this).install_default();
 }
 
 void RegisterMap::bind_window_resolver(const void* key,

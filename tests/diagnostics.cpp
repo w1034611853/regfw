@@ -72,17 +72,38 @@ void declaration_errors() {
         "ARRAY[0]",
         "ARRAY[1]");
 }
+struct RORegisters : reg::RegEntityBundle {
+    REG_BUNDLE(RORegisters);
+    REG(RO32,
+        std::uint32_t,
+        reg::at(0).reset(7).access(reg::ro).array(reg::dims(2), reg::strides(4)));
+    REG(RO64,
+        std::uint64_t,
+        reg::at(0x20).access(reg::ro).transaction(reg::TransactionPolicy::LOW_TO_HIGH));
+    REG(RO128, Wide, reg::at(0x40).access(reg::ro));
+    REG(RW64, std::uint64_t, reg::at(0x80));
+    REG(WIDE128, Wide, reg::at(0x100));
+    REG(HIGH128, Wide, reg::at(0x120).transaction(reg::TransactionPolicy::HIGH_TO_LOW));
+};
+struct ROLayout : reg::Bundle {
+    REG_BUNDLE(ROLayout);
+    REG_ENTITY(regs, RORegisters);
+    REG_LAYOUT([&] {
+        return reg::address_space("RO_IO")
+            .map(reg::view("BASE", 0x200).map(regs), 0)
+            .map(reg::view("IDENTITY", 8).map(regs.RO32).identity(7), 0, 1)
+            .map(reg::view("RO_ALIAS", 8).map(regs.RO32).identity(7).read_only_ignore_writes(),
+                 0x200);
+    });
+};
 void read_only_and_truncation(HLogLogger* logger) {
-    reg::RegisterMap map(0x400, "RO", logger);
-    auto ro = map.create_reg<std::uint32_t>(
-        0, "RO32", reg::at(0).reset(7).access(reg::ro).array(reg::dims(2), reg::strides(4)));
-    auto ro64 = map.create_reg<std::uint64_t>(
-        0x20, "RO64", reg::at(0).access(reg::ro).transaction(reg::TransactionPolicy::LOW_TO_HIGH));
-    auto rowide = map.create_reg<Wide>(0x40, "RO128", reg::at(0).access(reg::ro));
-    auto rw = map.create_reg<std::uint64_t>(0x80, "RW64");
-    auto wide = map.create_reg<Wide>(0x100, "WIDE128");
-    auto high = map.create_reg<Wide>(
-        0x120, "HIGH128", reg::at(0).transaction(reg::TransactionPolicy::HIGH_TO_LOW));
+    reg::RegisterBank<ROLayout> bank(reg::space(0x400).name("RO"));
+    auto& map = bank.map();
+    map.set_logger(logger);
+    auto& ro = bank->regs.RO32;
+    auto& ro64 = bank->regs.RO64;
+    auto& rowide = bank->regs.RO128;
+    auto& rw = bank->regs.RW64;
     unsigned callbacks = 0, index_calls = 0, pre_calls = 0, identity_calls = 0;
     ro.on_write([&] {
         ++callbacks;
@@ -107,14 +128,10 @@ void read_only_and_truncation(HLogLogger* logger) {
     map.set_pre_access([&](const auto&) {
         ++pre_calls;
     });
-    reg::RegLayout layout(map);
-    layout.identity_repeat_window({0, 1, 8, 8}, 7, reg::IdentityRemapMode::IdentityOnly);
     map.set_identity_resolver([&](const auto& r) {
         ++identity_calls;
         return r.request_id;
     });
-    map.map_alias_window_with_policy(
-        0x200, 0, 8, reg::AliasAccessPolicy::READ_ONLY_IGNORE_WRITES, "RO_ALIAS");
     map.finalize();
     CHECK(map.mmio_write(0, 99).result == reg::RegMemTxResult::Ignored);
     CHECK(map.mmio_write(0x20, 99).result == reg::RegMemTxResult::Ignored);
@@ -134,8 +151,6 @@ void read_only_and_truncation(HLogLogger* logger) {
     CHECK(map.try_mmio_read_sized(0x10c, 4).success());
     CHECK(map.try_mmio_read_sized(0x12c, 4).success());
     CHECK(map.try_mmio_read_sized(0x120, 4).success());
-    (void)wide;
-    (void)high;
 }
 void wide_hex_formatting() {
     CHECK(reg::WideUInt<65>::from_words({1, 1}).hex() == "10000000000000001");
@@ -176,10 +191,26 @@ void truncation_widths(HLogLogger* logger, std::ifstream& log) {
     }
     CHECK(count == expected.size());
 }
+struct LintRegs : reg::RegEntityBundle {
+    REG_BUNDLE(LintRegs);
+    REG(ITEM, std::uint32_t, reg::at(0).array(reg::dims(2), reg::strides(4)));
+    REG(COMMAND, std::uint32_t, reg::at(0x8));
+};
+struct RedirectLayout : reg::Bundle {
+    REG_BUNDLE(RedirectLayout);
+    REG_REPEAT_ENTITY(vf, LintRegs, 2);
+    REG_LAYOUT([&] {
+        return reg::address_space("IO").map_repeat(
+            "VFS", 0, reg::repeat(2).stride(0x100), [&](auto i) {
+                return reg::view("VF", 0x100).map(vf[i]).identity(9);
+            });
+    });
+};
 void lint_and_explain() {
     reg::RegisterMap map(0x400, "EXPLAIN");
-    auto item =
-        map.create_reg<std::uint32_t>(0, "ITEM", reg::at(0).array(reg::dims(2), reg::strides(4)));
+    auto regs = reg::build<LintRegs>(
+        reg::RegScope(map, 0, 0x400, "REGS", {}, {}, {}, 1, 0, 0, false, true));
+    auto& item = regs.ITEM;
     unsigned calls = 0;
     reg::Groups groups;
     groups.group("POOL")
@@ -197,15 +228,16 @@ void lint_and_explain() {
     auto warning = map.layout_warnings();
     CHECK(warning.size() == 1 && warning[0].code == "REGFW_MISSING_IDENTITY_DOMAIN");
     CHECK(map.describe_layout().find("LAYOUT WARNINGS") != std::string::npos);
-    reg::RegLayout layout(map);
-    layout.identity_repeat_window({0, 1, 8, 8}, 7, reg::IdentityRemapMode::IdentityOnly);
+    const auto inner = reg::view("INNER", 8).map(item).identity(7);
+    reg::apply_layout(map,
+                      reg::address_space("IO")
+                          .map(reg::view("OUTER", 8).map(inner), 0x200)
+                          .map(reg::view("CMD", 4).map(regs.COMMAND), 0x300));
     map.set_identity_resolver([&](const auto& r) {
         ++calls;
         return r.request_id;
     });
-    map.map_alias_window(0x100, 0, 8, "INNER");
-    map.map_alias_window(0x200, 0x100, 8, "OUTER");
-    auto command = map.create_reg<std::uint32_t>(0x300, "COMMAND");
+    auto& command = regs.COMMAND;
     command.on_write([&](const reg::RegAccessInfo&) {
         ++calls;
     });
@@ -216,7 +248,7 @@ void lint_and_explain() {
     CHECK(text.find("OUTER") != std::string::npos && text.find("INNER") != std::string::npos);
     CHECK(text.find("IDENTITY") != std::string::npos && text.find("POOL") != std::string::npos &&
           text.find("ITEM") != std::string::npos);
-    CHECK(map.explain_address(0x300).find("REGISTER COMMAND") != std::string::npos);
+    CHECK(map.explain_address(0x300).find("COMMAND") != std::string::npos);
     CHECK(map.explain_address(0x380).find("unmapped") != std::string::npos);
     CHECK(map.explain_address(1).find("unaligned") != std::string::npos);
     CHECK(calls == 0 && before == map.dump_state_versioned().data);
@@ -235,22 +267,20 @@ void lint_and_explain() {
     CHECK(calls == 1);
     CHECK(wide_map.try_mmio_read_sized(12, 4).value == 42 && calls == 1);
     // Dynamic bank redirection remains symbolic unless the caller supplies an ID.
-    reg::RegisterMap dynamic(0x200);
-    auto a = dynamic.create_reg<std::uint32_t>(0, "VF0");
-    auto b = dynamic.create_reg<std::uint32_t>(0x100, "VF1");
-    reg::RegLayout dl(dynamic);
-    dl.identity_repeat_window({0, 2, 0x100, 0x100}, 9, reg::IdentityRemapMode::RedirectBank);
+    reg::RegisterBank<RedirectLayout> redirected(reg::space(0x200));
+    auto& dynamic = redirected.map();
     dynamic.set_identity_resolver([&](const auto&) {
         ++calls;
         return 1u;
     });
     dynamic.finalize();
     CHECK(dynamic.explain_address(0).find("resolved_id=?") != std::string::npos);
-    CHECK(dynamic.explain_address(0, 4, reg::RegTransactionKind::Read, 1).find("REGISTER VF1") !=
+    CHECK(dynamic.explain_address(0, 4, reg::RegTransactionKind::Read, 1).find("VF[1]") !=
           std::string::npos);
     CHECK(dynamic.explain_address(0, 4, reg::RegTransactionKind::Read, 2).find("out of range") !=
           std::string::npos);
-    CHECK(calls == 1 && a.ref() == 0 && b.ref() == 0);
+    CHECK(calls == 1 && redirected->vf[0].ITEM.at(0).ref() == 0 &&
+          redirected->vf[1].ITEM.at(0).ref() == 0);
     reg::RegisterMap native(0x100);
     auto full = native.create_reg<std::uint64_t>(
         0x10, "NATIVE64", reg::at(0).access_widths(reg::RegisterAccessWidthPolicy::U64_ONLY));
@@ -275,9 +305,9 @@ int main() try {
     const std::string log{std::istreambuf_iterator<char>(file), {}};
     CHECK(log.find("write-truncation") != std::string::npos &&
           log.find("1122334455667788") != std::string::npos);
-    CHECK(log.find("register=WIDE128") != std::string::npos &&
+    CHECK(log.find("WIDE128") != std::string::npos &&
           log.find("required first beat byte offset=0") != std::string::npos);
-    CHECK(log.find("register=HIGH128") != std::string::npos &&
+    CHECK(log.find("HIGH128") != std::string::npos &&
           log.find("required first beat byte offset=12") != std::string::npos);
     truncation_widths(logger, file);
     std::cout << "PASS: declaration facts, RO suppression, truncation/beat diagnostics, lint and "

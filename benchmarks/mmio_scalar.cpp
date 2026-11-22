@@ -10,12 +10,16 @@ struct Registers : reg::RegEntityBundle {
     REG_BUNDLE(Registers);
     REG(VALUES, std::uint32_t, reg::at(0).array(reg::dims(N), reg::strides(4)));
 };
-template <unsigned N>
+template <unsigned N, bool Mirror>
 struct Views : reg::Bundle {
     REG_BUNDLE(Views);
     REG_ENTITY(regs, Registers<N>);
     REG_LAYOUT([&] {
-        return reg::address_space("ROOT").map(reg::view("REGS", N * 4).map(regs), 0);
+        const auto view = reg::view("REGS", N * 4).map(regs);
+        const auto space = reg::address_space("ROOT").map(view, 0);
+        if constexpr (Mirror)
+            return space.map(view, N * 4);
+        return space;
     });
 };
 static double now() {
@@ -24,18 +28,16 @@ static double now() {
         std::abort();
     return double(t.tv_sec) + double(t.tv_nsec) * 1e-9;
 }
-template <unsigned N, bool Space>
+template <unsigned N, bool Space, bool Mirror = false>
 void run(std::string_view mode,
          bool finish,
          std::string_view callback,
          bool write,
          std::uint64_t iterations,
          bool logger) {
-    using Root = std::conditional_t<Space, Views<N>, Registers<N>>;
-    const auto base = mode == "alias" ? N * 4 : 0;
+    using Root = std::conditional_t<Space, Views<N, Mirror>, Registers<N>>;
+    constexpr auto base = Mirror ? N * 4 : 0;
     reg::RegisterBank<Root> bank(reg::space(N * 4 + base).name("BENCH"));
-    if (base)
-        bank.map().map_alias_window(base, 0, N * 4, "MIRROR");
     auto& array = [&]() -> auto& {
         if constexpr (Space)
             return bank->regs.VALUES;
@@ -120,6 +122,8 @@ int main(int argc, char** argv) {
     auto select = [&]<unsigned N>() {
         if (mode == "space")
             run<N, true>(mode, finish, argv[4], write, iterations, logger);
+        else if (mode == "alias")
+            run<N, true, true>(mode, finish, argv[4], write, iterations, logger);
         else
             run<N, false>(mode, finish, argv[4], write, iterations, logger);
     };

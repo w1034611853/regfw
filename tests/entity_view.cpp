@@ -31,44 +31,37 @@ struct NativeArrays : reg::RegEntityBundle {
     REG(ITEMS, NativeCounter, reg::at(0).array(reg::dims(6), reg::strides(8)));
     REG(GRID, NativeCounter, reg::at(0x40).array(reg::dims(2, 3), reg::strides(32, 8)));
 };
-struct Window : reg::RegViewBundle {
-    REG_BUNDLE(Window);
-};
-struct Readonly : reg::RegViewBundle {
-    REG_BUNDLE(Readonly);
-};
 struct Doorbell : reg::RegEntityBundle {
     REG_BUNDLE(Doorbell);
     REG(VALUE, std::uint32_t, reg::at(0));
 };
 struct Layout : reg::Bundle {
     REG_BUNDLE(Layout);
-    REG_ENTITY(shared, Shared, reg::aperture().at(0).size_bytes(0x100));
-    REG_REPEAT_ENTITY(vf,
-                      Business,
-                      2,
-                      reg::aperture().at(0x1000).size_bytes(0x100).stride(0x100).reset_per_instance(
-                          reg::ResetScope::Vf));
-    REG_REPEAT_VIEW(windows,
-                    Window,
-                    2,
-                    reg::aperture().at(0x2000).size_bytes(0x200).stride(0x200).reset_per_instance(
-                        reg::ResetScope::Vf));
-    REG_VIEW(readonly, Readonly, reg::aperture().at(0x3000).size_bytes(0x100));
-    REG_REPEAT_ENTITY(doorbells, Doorbell, 2, reg::aperture().at(0x3100).size_bytes(4).stride(4));
-    REG_LAYOUT(.views =
-                   {
-                       reg::view(windows).at(0).size_bytes(0x100).to(vf).vf_to_pf(),
-                       reg::view(vf).at(0x40).size_bytes(4).to(shared.VALUE).pf_to_vf(),
-                       reg::view(readonly)
-                           .at(0)
-                           .size_bytes(0x100)
-                           .to(shared)
-                           .read_only_ignore_writes(),
-                       reg::view(reg::PhysicalAddressWindow{0x2100, 4}).to(doorbells[0].VALUE),
-                       reg::view(reg::PhysicalAddressWindow{0x2300, 4}).to(doorbells[1].VALUE),
-                   },
-               .identities = {reg::identity(vf, 1), reg::identity(windows, 1)});
+    REG_ENTITY(shared, Shared);
+    REG_REPEAT_ENTITY(vf, Business, 2, reg::entity().reset_per_instance(reg::ResetScope::Vf));
+    REG_REPEAT_ENTITY(doorbells, Doorbell, 2);
+    REG_LAYOUT([&] {
+        return reg::address_space("IO")
+            .map(reg::view("SHARED", 4).map(shared), 0)
+            .map_repeat(
+                "DIRECT_VF",
+                0x1000,
+                reg::repeat(2).stride(0x100),
+                [&](auto i) {
+                    return reg::view("VF", 0x100).map(vf[i]).map(shared.VALUE, 0x40).identity(1);
+                })
+            .map_repeat("WINDOWS",
+                        0x2000,
+                        reg::repeat(2).stride(0x200),
+                        [&](auto i) {
+                            return reg::view("WINDOW", 0x200)
+                                .map(vf[i])
+                                .map(shared.VALUE, 0x40)
+                                .map(doorbells[i].VALUE, 0x100)
+                                .identity(1);
+                        })
+            .map(reg::view("RO", 4).map(shared).read_only_ignore_writes(), 0x3000);
+    });
 };
 template <class F>
 void fails(F&& action, reg::ErrorKind kind) {
@@ -88,7 +81,7 @@ void automatic_ownership_and_mapping() {
     reg::RegisterBank<Layout> bank(reg::space(0x4000).name("ENTITY_VIEW"));
     auto& map = bank.map();
     CHECK(map.entity_count() == 7 && map.total_node_data_count() == 17);
-    CHECK(map.mapped_view_count() == 14);
+    CHECK(map.mapped_view_count() == 7);
     auto initial = map.dump_state_versioned();
     CHECK(initial.schema.slots.size() == 7 && initial.data.size() == 17);
     unsigned writes = 0;
@@ -126,8 +119,7 @@ void automatic_ownership_and_mapping() {
     CHECK(bank->vf[1].VALUE.ref() == 0 && bank->vf[0].VALUE.ref() == 10 &&
           bank->shared.VALUE.ref() == 21);
     map.restore_state_versioned(initial);
-    CHECK(bank->shared.VALUE.ref() == 7 && map.entity_count() == 7 &&
-          map.mapped_view_count() == 14);
+    CHECK(bank->shared.VALUE.ref() == 7 && map.entity_count() == 7 && map.mapped_view_count() == 7);
 }
 void span_bounds_and_lifetime() {
     reg::RegisterBank<Layout> bank(reg::space(0x4000).name("SPANS").finalize());
@@ -254,14 +246,14 @@ void invalid_views() {
         [&] {
             reg::apply_layout(
                 first.map(),
-                {.views = {reg::view(reg::PhysicalAddressWindow{0x40, 4}).to(second->VALUE)}});
+                reg::address_space("CROSS_MAP").map(reg::view("BAD", 4).map(second->VALUE), 0x40));
         },
         reg::ErrorKind::Configuration);
-    auto stale = reg::view(reg::PhysicalAddressWindow{0x40, 4}).to(second->VALUE);
+    auto stale = reg::address_space("STALE").map(reg::view("BAD", 4).map(second->VALUE), 0x40);
     second.clear();
     fails(
         [&] {
-            reg::apply_layout(first.map(), {.views = {stale}});
+            reg::apply_layout(first.map(), stale);
         },
         reg::ErrorKind::Configuration);
 }

@@ -402,21 +402,4 @@ void RegScope::claim(std::uint64_t offset,
     claims.try_emplace(offset, offset, size, std::move(name), at);
 }
 
-void RegLayout::claim(std::uint64_t base,
-                      std::uint64_t size,
-                      std::string name,
-                      std::source_location at) {
-    if (map_.is_finalized() || !size || base % 4 || size % 4 || base > map_.size_bytes() ||
-        size > map_.size_bytes() - base)
-        throw Error("invalid layout region", ErrorKind::Configuration);
-    for (auto& c : claims_)
-        if (detail::overlaps(base, size, c.base(), c.size()))
-            throw Error("overlapping apertures:\n  " +
-                            detail::declaration(c.name(), c.base(), c.size(), c.location()) +
-                            "\n  " + detail::declaration(name, base, size, at),
-                        ErrorKind::Configuration,
-                        at);
-    claims_.emplace_back(base, size, std::move(name), at);
-}
-
 } // namespace reg

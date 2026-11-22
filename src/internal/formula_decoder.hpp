@@ -225,7 +225,7 @@ class FormulaDecoder {
         }
         return hash;
     }
-    void finish_entity_hash() {
+    void finish_entity_hash(bool implicit_root) {
         // One EntityView per actual mapping scope (not per full AddressSpace
         // View). The key is an entity-local offset, so aliases use identical
         // hashes and carry only their own binding/mount ID array.
@@ -351,10 +351,11 @@ class FormulaDecoder {
                 const auto& scope = scopes_[mount.scope];
                 const auto identity_index =
                     scope.identity == STATIC_NONE ? STATIC_NONE : identity_base_ + scope.identity;
+                const auto instance = implicit_root ? binding.node->instance : scope.instance;
                 view.prepared.push_back({{binding.canonical_base,
                                           AccessRoute{scope.route, scope.instance.value_or(0)},
                                           scope.policy,
-                                          scope.instance,
+                                          instance,
                                           scope.name,
                                           binding.canonical_base != mount.base},
                                          &mount,
@@ -526,8 +527,6 @@ class FormulaDecoder {
         const auto& bound = *hit.context;
         const auto& mount = *bound.mount;
         const auto& binding = *bound.binding;
-        out.compiled = true;
-        out.defined = true;
         out.target = binding.canonical_base + (word - mount.base);
         out.used = out.target != word;
         out.available = info.available;
@@ -545,20 +544,11 @@ class FormulaDecoder {
         out.view_name = bound.view_name;
         out.pre_access_chain = bound.pre_access_chain;
         out.priority = bound.priority;
-        out.name = {};
         if (bound.identity_index != STATIC_NONE)
             out.identity_index = bound.identity_index;
         else
             out.identity_index.reset();
-        if (!out.target_entry)
-            out.target_entry.emplace();
-        auto& entry = *out.target_entry;
-        entry.node = bound.node;
-        entry.linear = binding.linear + info.linear;
-        entry.byte_offset = info.byte;
-        entry.source_instance = bound.instance;
-        entry.view = bound.node_layout;
-        entry.precomputed_index = nullptr;
+        out.target_entry = {bound.node, binding.linear + info.linear, info.byte, bound.node_layout};
     }
     // Dynamic (AddressSpace/RegView) layouts use the same decoder as compiled
     // static layouts. The compiler emits one pattern mount per mapped REG
@@ -572,9 +562,10 @@ class FormulaDecoder {
                          std::vector<FormulaArraySpec> arrays,
                          std::vector<std::vector<ElementRecord>> record_storage,
                          std::vector<Reserve> reserves,
-                         std::vector<LayoutWarning>* warnings);
-    void finish_dispatch_tables() {
-        finish_entity_hash();
+                         std::vector<LayoutWarning>* warnings,
+                         bool implicit_root = false);
+    void finish_dispatch_tables(bool implicit_root = false) {
+        finish_entity_hash(implicit_root);
     }
     // Resolve identity/single-index fast-path eligibility once at finalize().
     // The per-access path used to decode bank 0 (or the source element) on

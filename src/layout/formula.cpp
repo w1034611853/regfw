@@ -187,7 +187,8 @@ void FormulaDecoder::install_dynamic(RegisterMap* map,
                                      std::vector<FormulaArraySpec> arrays,
                                      std::vector<std::vector<ElementRecord>> record_storage,
                                      std::vector<Reserve> reserves,
-                                     std::vector<LayoutWarning>* warnings) {
+                                     std::vector<LayoutWarning>* warnings,
+                                     bool implicit_root) {
     owner_ = map;
     identity_base_ = identity_base;
     scopes_.swap(scopes);
@@ -216,7 +217,7 @@ void FormulaDecoder::install_dynamic(RegisterMap* map,
                         ErrorKind::Configuration);
     });
     // Prepare the shared EntityLayout hashes and per-instance bindings.
-    finish_dispatch_tables();
+    finish_dispatch_tables(implicit_root);
     // No Zone/Candidate/Page/Run tables or per-access caches.
     // Validate actual occupied bytes directly; outer View envelopes are not
     // treated as occupied, and a higher-priority mount must actually have a
@@ -388,11 +389,10 @@ class FormulaInstaller {
   public:
     static void install(RegisterMap& map, void* root, FormulaPlanView plan) {
         map.mutable_layout();
-        bool legacy = false;
-        map.lookup_.for_each([&](auto, const auto&) {
-            legacy = true;
-        });
-        if (legacy || map.formula_ || plan.scopes.empty())
+        if (map.formula_ || plan.scopes.empty() ||
+            std::any_of(map.nodes_.begin(), map.nodes_.end(), [](auto* node) {
+                return node->layout().mapped;
+            }))
             throw Error("static layout requires fresh storage-only entities",
                         ErrorKind::Configuration);
         std::vector<EntityState*> nodes;
@@ -440,7 +440,6 @@ class FormulaInstaller {
                 s.repeated ? s.repeat_stride : 0,
                 s.repeated ? s.repeat_index : 0));
             auto& scope = map.layout_scopes_[scope_ids.back()];
-            scope.recursive_window = true;
             scope.purpose = s.reserved ? "RESERVED" : "VIEW";
             if (s.mapping) {
                 const auto* bundle = s.bundle(root, s.selectors);

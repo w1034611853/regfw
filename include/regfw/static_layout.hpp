@@ -1034,16 +1034,9 @@ DeclaredLayoutRoot<Root>::DeclaredLayoutRoot(F&& factory) {
 }
 template <class Root>
 void apply_declared_layout(RegisterMap& map, Root* root, const DeclaredLayoutSpec<Root>& spec) {
-    if (spec.root.install) {
-        if (spec.views.size() || spec.aliases.size() || spec.identities.size() ||
-            spec.reserved.size())
-            throw Error("compiled root cannot be mixed with legacy layout entries",
-                        ErrorKind::Configuration);
+    if (spec.root.install)
         spec.root.install(map, root);
-    } else
-        apply_layout(
-            map,
-            LayoutSpec{
-                spec.root.dynamic, spec.views, spec.aliases, spec.identities, spec.reserved});
+    else
+        apply_layout(map, LayoutSpec{spec.root.dynamic});
 }
 } // namespace reg::detail

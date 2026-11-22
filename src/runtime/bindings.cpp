@@ -63,6 +63,8 @@ RegisterMap::Node* RegisterMap::create_node(std::uint64_t address,
                                             std::optional<ResetScope> default_scope,
                                             bool storage_only) {
     mutable_layout();
+    if (formula_)
+        throw Error("register layout is installed", ErrorKind::Configuration);
     if (address % 4)
         throw Error("register base must be 4-byte aligned", ErrorKind::Configuration);
     auto n = configure_node(std::move(name), spec, type.bits / 8, instance, default_scope);
@@ -77,11 +79,6 @@ RegisterMap::Node* RegisterMap::create_node(std::uint64_t address,
     n->scalar_stride = type.bytes;
     n->direct_wide_storage = type.direct_wide;
     return install_node(address, std::move(n), spec.stride_bytes, storage_only);
-}
-std::tuple<std::uint64_t, AccessRoute, std::optional<AccessIdentity>>
-RegisterMap::resolve_address_with_identity(std::uint64_t address, unsigned size) {
-    auto r = resolve_metadata(address, size);
-    return std::tuple{r.alias.target, r.alias.route, r.identity};
 }
 std::pair<std::uint64_t, AccessRoute> RegisterMap::resolve_address_route(std::uint64_t address,
                                                                          unsigned size) const {
@@ -98,14 +95,9 @@ std::uint64_t RegisterMap::size_bytes() const {
     return size_;
 }
 std::size_t RegisterMap::mapped_view_count() const noexcept {
-    return std::count_if(primary_views_.begin(),
-                         primary_views_.end(),
-                         [](const auto& v) {
-                             return v->mapped;
-                         }) +
-           std::count_if(windows_.begin(), windows_.end(), [](const auto& w) {
-               return !w.terminal;
-           });
+    return std::count_if(primary_views_.begin(), primary_views_.end(), [](const auto& v) {
+        return v->mapped;
+    });
 }
 std::weak_ptr<void> RegisterMap::lifetime() const {
     return life_;

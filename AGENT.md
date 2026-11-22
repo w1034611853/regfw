@@ -54,7 +54,7 @@ struct CommandRegs : reg::RegEntityBundle {
 
 `at` 是实体组内字节偏移；view.map(target,offset) 的 offset 相对当前 View。REG 的一个宽值不等于多个独立 uint32 REG。数组必须给 dims 和字节 strides，rank 1..8，维度非零；最大位宽 2048 bit。map/View/base 对齐要求、访问宽度与边界见完整说明 §4。
 
-单次 REG_ENTITY 创建唯一存储，多次 map 只增加入口；重复实体才复制存储。共享实体可为 Pf reset scope，仅有 VF 地址入口也合法。旧 Window DSL（reg::window、reg::Window、sub_windows 和 window.hpp）已经删除；只返回 AddressSpace。低级 legacy alias/aperture 维护接口未在本次移除，但不能与 AddressSpace 根混合。
+单次 REG_ENTITY 创建唯一存储，多次 map 只增加入口；重复实体才复制存储。共享实体可为 Pf reset scope，仅有 VF 地址入口也合法。手动别名、保留区和身份窗口统一通过 AddressSpace 声明。没有 REG_LAYOUT 的平坦 bank 使用默认根 View。直接使用 RegisterMap::create_reg 时，先完成寄存器声明与绑定，再 finalize 安装默认根 View。
 
 `AddressView.map` / `AddressSpace.map` 返回新对象，循环中需赋回。`AddressView.map_repeat(name,offset,reg::repeat(N).stride(S),factory)` 在局部 View 中建立重复族；`AddressSpace.map_repeat(name,base,repeat,factory)` 在根上建立。两者自动提供身份实例编号；直接多次 map 不会自动形成 VF 身份族。实体组映射保留其局部偏移，单寄存器/切片映射把首元素平移到指定 offset。权限只取选中的 View 路径；显式 reserve 是终止区。
 

@@ -438,16 +438,15 @@ void declaration_order_independence() {
           b->mid.VALUE.ref() == 7);
 }
 
-void legacy_64bit_and_bounds() {
+void flat_root_64bit_and_bounds() {
     constexpr auto top = UINT64_MAX & ~std::uint64_t{3};
     reg::RegisterMap map(top);
     auto low = map.create_reg<std::uint32_t>(0x40, "LOW");
     auto high = map.create_reg<std::uint32_t>(B + 0x40, "HIGH");
     auto end = map.create_reg<std::uint32_t>(top - 4, "END");
-    map.map_alias_window(A + 0x40, B + 0x40, 4);
     map.finalize();
     CHECK(high.address() == B + 0x40 && end.address() == top - 4);
-    CHECK(map.mmio_write(A + 0x40, 123).success() && high.ref() == 123 && low.ref() == 0);
+    CHECK(map.mmio_write(B + 0x40, 123).success() && high.ref() == 123 && low.ref() == 0);
     CHECK(map.mmio_write(top - 4, 42).success() && end.ref() == 42);
     CHECK(!map.try_mmio_read_sized(top, 4).success());
     auto meta = high.metadata();
@@ -461,7 +460,7 @@ int main() try {
     register_slices_and_split_visibility();
     identity_offsets_above_4g();
     declaration_order_independence();
-    legacy_64bit_and_bounds();
+    flat_root_64bit_and_bounds();
     std::cout << "PASS: composable views, two 64-bit VF entrances, sparse overlay holes, shadow "
                  "warnings, priority locality, no error fallback, shared "
                  "callbacks/transactions/snapshots, QEMU C bridge and reset isolation\n";

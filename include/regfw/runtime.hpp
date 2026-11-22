@@ -27,7 +27,6 @@ class FormulaDecoder;
 } // namespace detail
 class Groups;
 class RegScope;
-class RegLayout;
 class Bundle;
 template <class T, std::size_t Rank, bool ValueAccess>
 class RegView;
@@ -748,35 +747,6 @@ template <class Handle>
 using access_info_t = typename std::remove_cvref_t<Handle>::AccessInfo;
 
 namespace detail {
-// Address -> entry page table used by the manual (non-view) mapping path
-// and the alias cache. The static precomputed-index binding of the old
-// per-word backend was removed with that backend.
-template <class E>
-class SparseLookup {
-    static constexpr std::uint32_t empty = UINT32_MAX;
-    struct Page;
-    struct SparsePages;
-    std::uint64_t bytes_{};
-    std::unique_ptr<SparsePages> sparse_;
-    template <class F>
-    void for_each_page(F f) const;
-    std::vector<std::unique_ptr<Page>> pages_;
-    std::vector<E> entries_;
-
-  public:
-    explicit SparseLookup(std::uint64_t bytes);
-    ~SparseLookup();
-    const E* get(std::uint64_t address) const;
-    void insert(std::uint64_t address, E value);
-    void clear();
-    void freeze();
-    void swap(SparseLookup& other) noexcept;
-    template <class F>
-    void for_each(F f) const;
-    template <class F>
-    void for_each_mut(F f);
-};
-struct AddressWindow;
 struct IdentityWindow;
 struct LayoutScope;
 // Initialization-only diagnostics; never consulted by MMIO dispatch.
@@ -799,7 +769,6 @@ template <class F>
 CallbackDescription callback_description(std::string_view name, std::source_location at) {
     return {std::string(name), callback_type_name<F>(), at};
 }
-struct ReservedRegion;
 bool overlaps(std::uint64_t a, std::uint64_t n, std::uint64_t b, std::uint64_t m);
 std::string join_name(std::string_view prefix, std::string_view name);
 } // namespace detail
@@ -872,7 +841,8 @@ struct AccessResolverSlot {
 class RegisterMap {
     friend class Groups;
     friend class RegScope;
-    friend class RegLayout;
+    template <class>
+    friend class RegisterBank;
     friend struct detail::EntityState;
     friend class detail::ViewCompiler;
 
@@ -882,30 +852,21 @@ class RegisterMap {
     using Node = detail::EntityState;
     struct Entry;
     struct AliasEntry;
-    struct AliasHop;
     struct Resolution;
-    struct AddressResolution;
     struct AccessScratch;
     std::unique_ptr<AccessScratch> access_scratch_;
-    struct InstanceWindow;
     std::uint64_t size_{};
-    detail::SparseLookup<Entry> lookup_;
-    detail::SparseLookup<AliasEntry> aliases_;
 
     // Formula address decoding backend, the only view dispatcher since
     // the per-word tables were removed. Installed by install_formula_layout
     // and the dynamic AddressSpace compiler alike.
     std::unique_ptr<detail::FormulaDecoder> formula_;
-    bool direct_scalar_mode_{};
     std::vector<LayoutWarning> mapping_warnings_;
     std::vector<std::unique_ptr<std::string>> compiled_names_;
     std::vector<std::unique_ptr<detail::ViewPreAccessChain>> view_pre_access_chains_;
     std::vector<std::unique_ptr<RegEntity>> entities_;
     std::vector<Node*> nodes_;
     std::vector<std::unique_ptr<detail::RegViewLayout>> primary_views_;
-    std::vector<detail::AddressWindow> windows_;
-    std::vector<detail::ReservedRegion> reserved_;
-    std::vector<InstanceWindow> instances_;
     std::vector<detail::IdentityWindow> identities_;
     std::vector<detail::LayoutScope> layout_scopes_;
     std::shared_ptr<void> life_;
@@ -913,12 +874,6 @@ class RegisterMap {
     bool log_enabled(HLogLevel level) const noexcept;
     void emit_log(const detail::LogRecord& record) const noexcept;
     bool finalized_{};
-    struct ViewPolicy {
-        std::uint64_t base, size;
-        AliasAccessPolicy policy;
-    };
-    std::vector<ViewPolicy> view_policies_;
-    AliasAccessPolicy view_policy(std::uint64_t address, unsigned size) const;
     static std::uint64_t checked_map_size(std::uint64_t size);
     void require_initialized() const;
     using IdentityFn = std::function<std::uint32_t(const IdentityResolveRequest&)>;
@@ -971,30 +926,25 @@ class RegisterMap {
                                                                      std::string_view name);
     void clear_access_resolver(const void* id);
     bool has_access_resolver(const void* id) const;
-    std::optional<std::uint32_t> source_instance(std::uint64_t address) const;
-    const detail::AddressWindow* window_at(std::uint64_t address) const;
     void mutable_layout() const;
     void mutable_bindings() const;
     void region_check(std::uint64_t base, std::uint64_t n) const;
-    AliasEntry
-    walk_alias(std::uint64_t original, unsigned size, std::vector<AliasHop>* hops = nullptr) const;
     AliasEntry resolve_static(std::uint64_t address, unsigned size) const;
     inline AccessIdentity
     resolve_identity(const detail::IdentityWindow& window,
                      const IdentityResolveRequest& request,
                      std::source_location at = std::source_location::current()) const;
-    AddressResolution resolve_metadata(std::uint64_t address, unsigned size);
+    void install_default_layout();
     Resolution& resolve(std::uint64_t address,
                         unsigned size,
                         RegTransactionKind kind,
                         RegData value,
                         const AliasEntry* selected = nullptr);
-    template <unsigned Mode>
     Resolution& resolve_plan(std::uint64_t address,
                              unsigned size,
                              RegTransactionKind kind,
                              RegData value,
-                             const AliasEntry* selected);
+                             const AliasEntry& selected);
     template <bool Writing>
     std::optional<RegMmioReadResult>
     try_fast_mmio(std::uint64_t address, RegData value, unsigned size, const AliasEntry*& selected);
@@ -1009,7 +959,6 @@ class RegisterMap {
     template <bool Writing, class Log>
     RegMmioReadResult
     execute_scalar(Node& node, std::byte* data, detail::ScalarAccessFrame& frame, Log&& log);
-    std::optional<RegData> fast_scalar_resolved(Resolution& r, bool writing);
     template <bool Writing, class Selection>
     RegMmioReadResult mapped_scalar(std::uint64_t address, RegData value, const Selection& source);
     void validate_access(const Resolution& r) const;
@@ -1133,51 +1082,6 @@ class RegisterMap {
                     std::source_location location = std::source_location::current()) {
         return create_reg<T>(address, std::move(name), at(0, location));
     }
-    void reserve_region(std::uint64_t base,
-                        std::uint64_t size,
-                        std::string name = {},
-                        std::uint64_t repeat_count = 1,
-                        std::uint64_t repeat_stride = 0,
-                        std::uint64_t repeat_index = 0,
-                        std::source_location at = std::source_location::current());
-    void
-    map_routed_alias_window_with_policy(std::uint64_t source,
-                                        std::uint64_t target,
-                                        std::uint64_t size,
-                                        AccessRoute route,
-                                        AliasAccessPolicy policy,
-                                        std::string name = {},
-                                        std::source_location at = std::source_location::current());
-    void map_alias_window(std::uint64_t source,
-                          std::uint64_t target,
-                          std::uint64_t size,
-                          std::string name = {},
-                          std::source_location at = std::source_location::current());
-    void map_alias_window_with_policy(std::uint64_t source,
-                                      std::uint64_t target,
-                                      std::uint64_t size,
-                                      AliasAccessPolicy policy,
-                                      std::string name = {},
-                                      std::source_location at = std::source_location::current());
-    void map_routed_alias_window(std::uint64_t source,
-                                 std::uint64_t target,
-                                 std::uint64_t size,
-                                 AccessRoute route,
-                                 std::string name = {},
-                                 std::source_location at = std::source_location::current());
-
-  private:
-    void register_source_instance(std::uint64_t base, std::uint64_t size, std::uint32_t instance);
-
-  private:
-    void register_identity_repeat_window(PhysicalRepeatAddressWindow window,
-                                         std::uint64_t offset,
-                                         std::uint64_t size,
-                                         std::uint32_t domain,
-                                         IdentityRemapMode mode,
-                                         IdentityTraceLabels labels,
-                                         std::string name,
-                                         std::source_location at = std::source_location::current());
 
   public:
     template <class F>

@@ -5,8 +5,7 @@
 
 namespace reg {
 // RegisterMap lifetime and initialization.
-RegisterMap::RegisterMap() noexcept : lookup_(0), aliases_(0) {
-}
+RegisterMap::RegisterMap() noexcept = default;
 
 RegisterMap::RegisterMap(std::uint64_t size, std::string name, HLogLogger* logger) : RegisterMap() {
     init(size, std::move(name), logger);
@@ -16,84 +15,16 @@ void RegisterMap::init(std::uint64_t size, std::string name, HLogLogger* logger)
     if (size_)
         throw Error("register map has already been initialized", ErrorKind::Configuration);
     const auto checked_size = checked_map_size(size);
-    detail::SparseLookup<Entry> next_lookup(checked_size);
-    detail::SparseLookup<AliasEntry> next_aliases(checked_size);
     auto next_life = std::make_shared<char>();
     auto next_resolvers = std::make_unique<ResolverRegistry>();
     auto next_scratch = std::make_unique<AccessScratch>();
     // Complete every allocation before publishing any initialized state.
-    lookup_.swap(next_lookup);
-    aliases_.swap(next_aliases);
     life_ = std::move(next_life);
     access_resolvers_ = std::move(next_resolvers);
     access_scratch_ = std::move(next_scratch);
     logger_ = logger;
     name_prefix = std::move(name);
     size_ = checked_size;
-}
-
-void RegisterMap::register_source_instance(std::uint64_t base,
-                                           std::uint64_t size,
-                                           std::uint32_t instance) {
-    mutable_layout();
-    region_check(base, size);
-    instances_.push_back({base, size, instance});
-    lookup_.for_each_mut([&](auto address, Entry& entry) {
-        if (address >= base && address - base < size)
-            entry.source_instance = instance;
-    });
-}
-
-void RegisterMap::register_identity_repeat_window(PhysicalRepeatAddressWindow window,
-                                                  std::uint64_t offset,
-                                                  std::uint64_t size,
-                                                  std::uint32_t domain,
-                                                  IdentityRemapMode mode,
-                                                  IdentityTraceLabels labels,
-                                                  std::string name,
-                                                  std::source_location at) {
-    detail::IdentityWindow w{window.base,
-                             window.count,
-                             window.stride,
-                             window.size,
-                             offset,
-                             size,
-                             domain,
-                             mode,
-                             labels,
-                             std::move(name),
-                             {},
-                             at};
-    mutable_layout();
-    if (!w.count || w.count > UINT32_MAX || !w.stride || w.stride % 4 || !w.aperture_size ||
-        w.aperture_size > w.stride || w.region_offset % 4 || !w.region_size || w.region_size % 4 ||
-        w.region_offset > w.aperture_size || w.region_size > w.aperture_size - w.region_offset)
-        throw Error("invalid identity window", ErrorKind::Configuration);
-    if (w.base > size_ || w.aperture_size > size_ - w.base ||
-        (w.count - 1) > (size_ - w.base - w.aperture_size) / w.stride)
-        throw Error("identity span overflow/outside map", ErrorKind::Configuration);
-    region_check(w.base, (w.count - 1) * w.stride + w.aperture_size);
-    for (auto& old : identities_)
-        for (std::uint64_t a = 0; a < w.count; ++a)
-            for (std::uint64_t b = 0; b < old.count; ++b)
-                if (detail::overlaps(w.base + a * w.stride + w.region_offset,
-                                     w.region_size,
-                                     old.base + b * old.stride + old.region_offset,
-                                     old.region_size))
-                    throw Error(
-                        "overlapping identity windows:\n  " +
-                            detail::declaration(w.name,
-                                                w.base + a * w.stride + w.region_offset,
-                                                w.region_size,
-                                                at) +
-                            "\n  " +
-                            detail::declaration(old.name,
-                                                old.base + b * old.stride + old.region_offset,
-                                                old.region_size,
-                                                old.location),
-                        ErrorKind::Configuration,
-                        at);
-    identities_.push_back(std::move(w));
 }
 
 RegisterMap::~RegisterMap() = default;
@@ -175,7 +106,6 @@ RegisterMap::install_node(std::uint64_t address,
     std::vector<std::pair<std::uint64_t, std::size_t>> occupied_ranges;
     if (count > 1)
         occupied_ranges.reserve(count);
-    std::vector<std::pair<std::uint64_t, Entry>> entries;
     for (std::size_t k = 0; k < count; ++k) {
         auto idx = RegElementIndex::from_dims(n->dims, k);
         auto a = address;
@@ -190,43 +120,8 @@ RegisterMap::install_node(std::uint64_t address,
         }
         const auto occupied = std::max((n->value_size + 3u) & ~3u, 4u);
         region_check(a, occupied);
-        if (!storage_only) {
-            for (auto& r : reserved_)
-                if (detail::overlaps(a, occupied, r.base, r.size))
-                    throw Error(
-                        "register overlaps reserved region:\n  " +
-                            detail::declaration(full, a, occupied, n->declaration_location) +
-                            "\n  " + detail::declaration(r.name, r.base, r.size, r.location),
-                        ErrorKind::Configuration,
-                        n->declaration_location);
-            for (auto& w : windows_)
-                if (detail::overlaps(a, occupied, w.source_base, w.size))
-                    throw Error(
-                        "register overlaps alias source:\n  " +
-                            detail::declaration(full, a, occupied, n->declaration_location) +
-                            "\n  " + detail::declaration(w.name, w.source_base, w.size, w.location),
-                        ErrorKind::Configuration,
-                        n->declaration_location);
-        }
         if (count > 1)
             occupied_ranges.emplace_back(a, k);
-        if (!storage_only)
-            for (unsigned byte = 0; byte < occupied; byte += 4) {
-                if (auto* old = lookup_.get(a + byte))
-                    throw Error(
-                        "register address collision:\n  " +
-                            detail::declaration(full, a, occupied, n->declaration_location) +
-                            "\n  " +
-                            detail::declaration(old->node->name,
-                                                a + byte - old->byte_offset,
-                                                old->node->value_size,
-                                                old->node->declaration_location),
-                        ErrorKind::Configuration,
-                        n->declaration_location);
-                entries.push_back(
-                    {a + byte,
-                     {n.get(), static_cast<std::uint32_t>(k), byte, n->instance, primary.get()}});
-            }
         primary->local_addresses.push_back(a);
         primary->indices.push_back(idx);
         primary->mapped_addresses.push_back(a);
@@ -263,117 +158,7 @@ RegisterMap::install_node(std::uint64_t address,
     entities_.push_back(std::move(entity));
     primary_views_.push_back(std::move(primary));
     nodes_.push_back(ptr);
-    for (auto& [a, e] : entries)
-        lookup_.insert(a, e);
     return ptr;
-}
-
-void RegisterMap::reserve_region(std::uint64_t base,
-                                 std::uint64_t size,
-                                 std::string name,
-                                 std::uint64_t repeat_count,
-                                 std::uint64_t repeat_stride,
-                                 std::uint64_t repeat_index,
-                                 std::source_location at) {
-    mutable_layout();
-    region_check(base, size);
-    lookup_.for_each([&](auto a, const auto& e) {
-        if (a >= base && a - base < size)
-            throw Error("reserved region overlaps register:\n  " +
-                            detail::declaration(name, base, size, at) + "\n  " +
-                            detail::declaration(e.node->name,
-                                                a - e.byte_offset,
-                                                e.node->value_size,
-                                                e.node->declaration_location),
-                        ErrorKind::Configuration,
-                        at);
-    });
-    for (auto& r : reserved_)
-        if (detail::overlaps(base, size, r.base, r.size))
-            throw Error("reserved region overlap:\n  " + detail::declaration(name, base, size, at) +
-                            "\n  " + detail::declaration(r.name, r.base, r.size, r.location),
-                        ErrorKind::Configuration,
-                        at);
-    for (auto& w : windows_)
-        if (detail::overlaps(base, size, w.source_base, w.size))
-            throw Error("reserved region overlaps alias:\n  " +
-                            detail::declaration(name, base, size, at) + "\n  " +
-                            detail::declaration(w.name, w.source_base, w.size, w.location),
-                        ErrorKind::Configuration,
-                        at);
-    reserved_.push_back(
-        {base, size, std::move(name), repeat_count, repeat_stride, repeat_index, at});
-}
-
-void RegisterMap::map_routed_alias_window_with_policy(std::uint64_t source,
-                                                      std::uint64_t target,
-                                                      std::uint64_t size,
-                                                      AccessRoute route,
-                                                      AliasAccessPolicy policy,
-                                                      std::string name,
-                                                      std::source_location at) {
-    mutable_layout();
-    region_check(source, size);
-    region_check(target, size);
-    lookup_.for_each([&](auto a, const auto& e) {
-        if (a >= source && a - source < size)
-            throw Error("alias source overlaps register:\n  " +
-                            detail::declaration(name, source, size, at) + "\n  " +
-                            detail::declaration(e.node->name,
-                                                a - e.byte_offset,
-                                                e.node->value_size,
-                                                e.node->declaration_location),
-                        ErrorKind::Configuration,
-                        at);
-    });
-    for (auto& w : windows_)
-        if (detail::overlaps(source, size, w.source_base, w.size))
-            throw Error("alias source overlap:\n  " + detail::declaration(name, source, size, at) +
-                            "\n  " + detail::declaration(w.name, w.source_base, w.size, w.location),
-                        ErrorKind::Configuration,
-                        at);
-    for (auto& r : reserved_)
-        if (detail::overlaps(source, size, r.base, r.size))
-            throw Error("alias source overlaps reserved:\n  " +
-                            detail::declaration(name, source, size, at) + "\n  " +
-                            detail::declaration(r.name, r.base, r.size, r.location),
-                        ErrorKind::Configuration,
-                        at);
-    windows_.push_back({source, target, size, route, std::move(name), policy, false, {}, at});
-}
-
-void RegisterMap::map_alias_window(std::uint64_t source,
-                                   std::uint64_t target,
-                                   std::uint64_t size,
-                                   std::string name,
-                                   std::source_location at) {
-    map_routed_alias_window_with_policy(source,
-                                        target,
-                                        size,
-                                        AccessRoute::ALIAS,
-                                        AliasAccessPolicy::READ_WRITE,
-                                        std::move(name),
-                                        at);
-}
-
-void RegisterMap::map_alias_window_with_policy(std::uint64_t source,
-                                               std::uint64_t target,
-                                               std::uint64_t size,
-                                               AliasAccessPolicy policy,
-                                               std::string name,
-                                               std::source_location at) {
-    map_routed_alias_window_with_policy(
-        source, target, size, AccessRoute::ALIAS, policy, std::move(name), at);
-}
-
-void RegisterMap::map_routed_alias_window(std::uint64_t source,
-                                          std::uint64_t target,
-                                          std::uint64_t size,
-                                          AccessRoute route,
-                                          std::string name,
-                                          std::source_location at) {
-    map_routed_alias_window_with_policy(
-        source, target, size, route, AliasAccessPolicy::READ_WRITE, std::move(name), at);
 }
 
 void RegisterMap::clear_identity_resolver() {
@@ -410,24 +195,7 @@ void RegisterMap::finalize() {
     validate_resolver_bindings();
     if (finalized_)
         return;
-    aliases_.clear();
-    for (auto& n : nodes_)
-        if (!n->instance && !n->layout().indices.empty())
-            n->instance = source_instance(n->layout().mapped_addresses[0]);
-    auto cache = [&](std::uint64_t a) {
-        auto alias = walk_alias(a, 4);
-        if (alias.defined && lookup_.get(alias.target) && !aliases_.get(a))
-            aliases_.insert(a, alias);
-    };
-    for (const auto& w : windows_) {
-        if (w.mapped_offsets) {
-            for (const auto& r : *w.mapped_offsets)
-                for (std::uint64_t byte = 0; byte < r.second; byte += 4)
-                    cache(w.source_base + r.first + byte);
-        } else if (!w.terminal)
-            for (std::uint64_t a = w.source_base; a < w.source_base + w.size; a += 4)
-                cache(a);
-    }
+    install_default_layout();
     validate_integrity();
     // Layout and callback bindings are fixed after finish. Logger state
     // and the data consulted by callbacks remain live during each access.
@@ -438,12 +206,7 @@ void RegisterMap::finalize() {
                 (n->transaction_policy.read == SplitReadMode::Independent ? 1 : 0) |
                 (n->transaction_policy.write == SplitWriteMode::Independent ? 2 : 0);
     }
-    if (formula_)
-        formula_->prepare_fast_paths();
-    direct_scalar_mode_ = !formula_ && windows_.empty() && identities_.empty() &&
-                          view_policies_.empty() && reserved_.empty() && instances_.empty();
-    lookup_.freeze();
-    aliases_.freeze();
+    formula_->prepare_fast_paths();
     finalized_ = true;
     if (log_enabled(HLOG_LEVEL_WARN))
         for (const auto& warning : layout_warnings()) {
@@ -471,26 +234,7 @@ void RegisterMap::validate_integrity() const {
             n->transaction_state.size() != (n->transaction_policy.independent() ? 0 : count))
             throw Error("invalid node storage length");
     }
-    lookup_.for_each([&](auto a, const Entry& e) {
-        if (e.linear >= e.node->element_count())
-            throw Error("invalid lookup index");
-        if (e.node->value_size == 8) {
-            auto pair = lookup_.get(e.byte_offset ? a - 4 : a + 4);
-            if (!pair || pair->node != e.node || pair->linear != e.linear ||
-                pair->byte_offset != (e.byte_offset ? 0 : 4))
-                throw Error("invalid 64-bit pair");
-        }
-    });
     (void)snapshot_schema();
-    for (const auto& w : windows_) {
-        if (w.mapped_offsets) {
-            for (const auto& r : *w.mapped_offsets)
-                for (std::uint64_t byte = 0; byte < r.second; byte += 4)
-                    (void)walk_alias(w.source_base + r.first + byte, 4);
-        } else if (!w.terminal)
-            for (std::uint64_t a = w.source_base; a < w.source_base + w.size; a += 4)
-                (void)walk_alias(a, 4);
-    }
 }
 
 } // namespace reg

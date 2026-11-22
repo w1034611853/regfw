@@ -3,32 +3,17 @@
 
 namespace reg {
 struct RegisterMap::Entry {
-    Node* node;
-    std::uint32_t linear;
-    unsigned byte_offset;
-    std::optional<std::uint32_t> source_instance;
+    Node* node{};
+    std::uint32_t linear{};
+    unsigned byte_offset{};
     const detail::RegViewLayout* view{};
-    // Optional immutable index from the shared EntityLayout hash.
-    // It has a rank and coordinate array (up to MAX_REG_DIMS).
-    const RegElementIndex* precomputed_index{};
-};
-struct RegisterMap::AliasHop {
-    std::uint64_t from, to;
-    const detail::AddressWindow* window;
 };
 struct RegisterMap::AliasEntry : detail::ScalarAccessSite {
     std::uint64_t available{};
-    std::string_view name;
-    bool defined{true};
-    bool compiled{};
-    std::optional<Entry> target_entry;
+    Entry target_entry;
     std::optional<std::size_t> identity_index;
     std::int32_t priority{};
     const detail::ViewPreAccessChain* pre_access_chain{};
-};
-struct RegisterMap::InstanceWindow {
-    std::uint64_t base, size;
-    std::uint32_t instance;
 };
 struct RegisterMap::Resolution {
     Entry entry;
@@ -48,20 +33,11 @@ struct RegisterMap::AccessScratch {
     // Formula decoding scratch: [0] holds the selected view entry, [1] the
     // identity RedirectBank target. Both live only within one dispatch.
     RegisterMap::AliasEntry decoded[2]{};
-    // Direct callbacks share default route and policy. Only the source instance varies.
-    detail::ScalarAccessSite direct_site{};
     AccessScratch() {
         resolution.info.index_fields.borrow(index);
         resolution.info.mapped_fields.borrow(mapped);
     }
 };
-struct RegisterMap::AddressResolution {
-    AliasEntry alias;
-    std::optional<AccessIdentity> identity;
-    std::uint64_t alias_address;
-};
-
-namespace detail {}
 struct RegisterMap::ResolverRegistry {
     std::unordered_map<const void*, std::shared_ptr<detail::AccessResolverSlot>> slots;
     std::unordered_map<const void*, std::shared_ptr<detail::IdentityResolverSlot>> identities;

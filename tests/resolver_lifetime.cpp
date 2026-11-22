@@ -210,7 +210,7 @@ void index_observation(bool finished, bool light, unsigned width) {
 // The second coordinate is narrowed to uint8_t before the named mapping sees
 // it. An un-routed register supplies its source instance, or zero when absent.
 REG_ACCESS_FIELD(Column, std::uint8_t);
-void light_without_identity(std::optional<std::uint32_t> instance, bool finished) {
+void light_without_identity(std::optional<std::uint32_t> instance) {
     reg::RegisterMap map(4096, "NO_IDENTITY");
     auto words = map.create_reg<std::uint32_t>(
         0, "WORDS", reg::at(0).array(reg::dims(2, 260), reg::strides(1040, 4)), instance);
@@ -232,8 +232,7 @@ void light_without_identity(std::optional<std::uint32_t> instance, bool finished
             throw std::runtime_error("device error");
         return output;
     });
-    if (finished)
-        map.finalize();
+    map.finalize();
     const auto address = 1040u + 258u * 4u;
     CHECK(map.mmio_write(address, 77).success() && words.at(1, 7).ref() == 77);
     CHECK(map.mmio_read_sized(address, 2) == 77);
@@ -301,14 +300,14 @@ int main() try {
                 exercise<true>(width, hook, throwing);
             }
     for (bool finished : {false, true}) {
-        light_without_identity({}, finished);
-        light_without_identity(7u, finished);
         for (bool light : {false, true})
             for (unsigned width : {1u, 2u, 4u})
                 index_observation(finished, light, width);
     }
     prefer_existing_signature();
     registration_from_callback_is_rejected();
+    light_without_identity({});
+    light_without_identity(7u);
     std::cout << "PASS: fixed resolver ownership, pre-finish replacement, frozen bindings, "
                  "mutable results, exceptions, full/frame paths and snapshot restore\n";
 } catch (const std::exception& e) {

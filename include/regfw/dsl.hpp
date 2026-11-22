@@ -298,7 +298,6 @@ class RepeatBundle {
     B* values_{};
     std::size_t constructed_{};
     friend class RegScope;
-    friend class RegLayout;
     REGFW_DETAIL_NOINLINE void release() noexcept {
         if (values_) {
             std::destroy_n(values_, constructed_);
@@ -493,7 +492,6 @@ constexpr ApertureSpec entity() {
 }
 class RegScope {
     friend class Bundle;
-    friend class RegLayout;
     friend struct detail::Access;
     template <class B>
     friend B build(RegScope scope);
@@ -622,8 +620,6 @@ class RegScope {
                          i,
                          view_only_,
                          storage_only_));
-            if (!storage_only_)
-                map->register_source_instance(start, size, static_cast<std::uint32_t>(i));
             return child;
         };
         return RepeatBundle<B, N>::generate(make);
@@ -657,8 +653,6 @@ class RegScope {
                                                    i,
                                                    view_only_,
                                                    storage_only_)));
-            if (!storage_only_)
-                map->register_source_instance(base() + rel, size, static_cast<std::uint32_t>(i));
         }
         return out;
     }
@@ -776,33 +770,12 @@ class RegScope {
                          i,
                          view_only_,
                          storage_only_));
-            if (!storage_only_)
-                map->register_source_instance(start, size, static_cast<std::uint32_t>(i));
             return child;
         };
         return RepeatBundle<B, N>::generate(make);
     }
 
   public:
-    void reserve(std::uint64_t offset,
-                 std::uint64_t size,
-                 std::string name = {},
-                 std::source_location at = std::source_location::current()) {
-        auto r = region_.subregion(offset, size, name, at);
-        claim(offset, size, name, at);
-        map->reserve_region(r.base(), r.size(), r.name(), 1, 0, 0, at);
-    }
-    void alias(std::uint64_t offset,
-               const RegRegion& target,
-               std::string name = {},
-               AliasAccessPolicy policy = AliasAccessPolicy::READ_WRITE,
-               AccessRoute route = AccessRoute::ALIAS,
-               std::source_location at = std::source_location::current()) {
-        auto r = region_.subregion(offset, target.size(), name, at);
-        claim(offset, target.size(), name, at);
-        map->map_routed_alias_window_with_policy(
-            r.base(), target.base(), target.size(), route, policy, r.name(), at);
-    }
     void export_region(std::uint64_t offset, std::uint64_t size, std::string name) {
         exports.push_back(region_.subregion(offset, size, std::move(name)));
     }
@@ -914,211 +887,6 @@ inline auto scope(RegisterMap& map,
                   ResetScope reset = {}) {
     return RegScope(map, base, size, std::move(name), reset);
 }
-class RegLayout {
-    RegisterMap& map_;
-    std::uint64_t cursor_{};
-    std::shared_ptr<detail::ResetSet> reset_set_ = std::make_shared<detail::ResetSet>();
-    std::vector<RegRegion> claims_;
-
-  private:
-    void claim(std::uint64_t base,
-               std::uint64_t size,
-               std::string name,
-               std::source_location at = std::source_location::current());
-
-  public:
-  public:
-    explicit RegLayout(RegisterMap& map) : map_(map) {
-        reset_set_->lifetime = map.lifetime();
-    }
-    auto cursor() const {
-        return cursor_;
-    }
-    RegLayout& set_cursor(std::uint64_t value) {
-        if (value > map_.size_bytes() || value % 4 || map_.is_finalized())
-            throw Error("invalid layout cursor", ErrorKind::Configuration);
-        cursor_ = value;
-        return *this;
-    }
-    template <class B>
-    auto aperture_at(std::uint64_t base,
-                     std::uint64_t size,
-                     std::string name = {},
-                     ResetScope rs = {},
-                     std::source_location at = std::source_location::current()) {
-        claim(base, size, name, at);
-        return build<B>(RegScope(map_, base, size, std::move(name), rs, {}, reset_set_));
-    }
-    template <class B>
-    auto push_aperture(std::uint64_t size,
-                       std::string name = {},
-                       ResetScope rs = {},
-                       std::source_location at = std::source_location::current()) {
-        auto out = aperture_at<B>(cursor_, size, std::move(name), rs, at);
-        cursor_ += size;
-        return out;
-    }
-    template <class B, std::size_t N>
-    auto repeat_aperture_at(std::uint64_t base,
-                            std::uint64_t stride,
-                            std::uint64_t size,
-                            std::string name = {},
-                            ResetScope::Kind reset_kind = ResetScope::Global,
-                            std::source_location at = std::source_location::current()) {
-        static_assert(N > 0);
-        if (!stride || stride % 4 || size > stride || base > map_.size_bytes() ||
-            (N - 1) > (UINT64_MAX - base) / stride || (N - 1) * stride + base > map_.size_bytes() ||
-            size > map_.size_bytes() - base - (N - 1) * stride)
-            throw Error("invalid repeated aperture", ErrorKind::Configuration);
-        for (std::size_t i = 0; i < N; ++i)
-            claim(base + i * stride, size, name + "[" + std::to_string(i) + "]", at);
-        auto make = [&](std::size_t i) {
-            auto start = base + i * stride;
-            auto child = build<B>(RegScope(
-                map_,
-                start,
-                size,
-                name + "[" + std::to_string(i) + "]",
-                ResetScope{reset_kind,
-                           reset_kind == ResetScope::Vf ? static_cast<std::uint32_t>(i) : 0},
-                static_cast<std::uint32_t>(i),
-                reset_set_,
-                N,
-                stride,
-                i));
-            map_.register_source_instance(start, size, static_cast<std::uint32_t>(i));
-            return child;
-        };
-        return RepeatBundle<B, N>::generate(make);
-    }
-    template <class B, std::size_t N>
-    auto repeat_aperture(std::uint64_t stride,
-                         std::uint64_t size,
-                         std::string name = {},
-                         std::source_location at = std::source_location::current()) {
-        auto out = repeat_aperture_at<B, N>(
-            cursor_, stride, size, std::move(name), ResetScope::Global, at);
-        cursor_ += (N - 1) * stride + size;
-        return out;
-    }
-    template <class B>
-    auto repeat_aperture_at(std::uint64_t base,
-                            std::size_t count,
-                            std::uint64_t stride,
-                            std::uint64_t size,
-                            std::string name = {},
-                            ResetScope::Kind reset_kind = ResetScope::Global,
-                            std::source_location at = std::source_location::current()) {
-        DynamicRepeatBundle<B> out;
-        if (!stride || stride % 4 || size > stride || count > UINT32_MAX)
-            throw Error("invalid dynamic aperture", ErrorKind::Configuration);
-        if (count && (base > map_.size_bytes() || (count - 1) > (UINT64_MAX - base) / stride ||
-                      (count - 1) * stride + base > map_.size_bytes() ||
-                      size > map_.size_bytes() - base - (count - 1) * stride))
-            throw Error("dynamic aperture overflow", ErrorKind::Configuration);
-        out.values.reserve(count);
-        for (std::size_t i = 0; i < count; ++i) {
-            auto start = base + i * stride;
-            claim(start, size, name, at);
-            out.values.push_back(build<B>(RegScope(
-                map_,
-                start,
-                size,
-                name + "[" + std::to_string(i) + "]",
-                ResetScope{reset_kind,
-                           reset_kind == ResetScope::Vf ? static_cast<std::uint32_t>(i) : 0},
-                static_cast<std::uint32_t>(i),
-                reset_set_,
-                count,
-                stride,
-                i)));
-            map_.register_source_instance(start, size, static_cast<std::uint32_t>(i));
-        }
-        return out;
-    }
-    template <class B>
-    auto repeat_aperture(std::size_t count,
-                         std::uint64_t stride,
-                         std::uint64_t size,
-                         std::string name = {},
-                         std::source_location at = std::source_location::current()) {
-        auto out = repeat_aperture_at<B>(
-            cursor_, count, stride, size, std::move(name), ResetScope::Global, at);
-        if (count)
-            cursor_ += (count - 1) * stride + size;
-        return out;
-    }
-    RegLayout& padding(std::uint64_t size,
-                       std::string name = {},
-                       std::source_location at = std::source_location::current()) {
-        (void)reserve_at(cursor_, size, std::move(name), at);
-        cursor_ += size;
-        return *this;
-    }
-    RegRegion reserve_at(std::uint64_t base,
-                         std::uint64_t size,
-                         std::string name = {},
-                         std::source_location at = std::source_location::current()) {
-        claim(base, size, name, at);
-        map_.reserve_region(base, size, name, 1, 0, 0, at);
-        return RegRegion(base, size, std::move(name));
-    }
-    auto alias_region(std::uint64_t source,
-                      const RegRegion& target,
-                      std::string name = {},
-                      AliasAccessPolicy p = AliasAccessPolicy::READ_WRITE,
-                      std::source_location at = std::source_location::current()) {
-        claim(source, target.size(), name, at);
-        map_.map_alias_window_with_policy(source, target.base(), target.size(), p, name, at);
-        return RegRegion(source, target.size(), std::move(name));
-    }
-    auto routed_alias_region(std::uint64_t source,
-                             const RegRegion& target,
-                             AccessRoute route,
-                             std::string name = {},
-                             AliasAccessPolicy p = AliasAccessPolicy::READ_WRITE,
-                             std::source_location at = std::source_location::current()) {
-        claim(source, target.size(), name, at);
-        map_.map_routed_alias_window_with_policy(
-            source, target.base(), target.size(), route, p, name, at);
-        return RegRegion(source, target.size(), std::move(name));
-    }
-    auto alias_in_aperture(std::uint64_t source,
-                           const RegRegion& target,
-                           std::string name = {},
-                           AliasAccessPolicy p = AliasAccessPolicy::READ_WRITE,
-                           AccessRoute route = AccessRoute::ALIAS,
-                           std::source_location at = std::source_location::current()) {
-        bool contained = false;
-        for (auto& c : claims_)
-            if (source >= c.base() && source - c.base() <= c.size() &&
-                target.size() <= c.size() - (source - c.base()))
-                contained = true;
-        if (!contained)
-            throw Error("alias is not inside an aperture", ErrorKind::Configuration);
-        map_.map_routed_alias_window_with_policy(
-            source, target.base(), target.size(), route, p, name, at);
-        return RegRegion(source, target.size(), std::move(name));
-    }
-    void identity_repeat_window(PhysicalRepeatAddressWindow w,
-                                std::uint32_t domain,
-                                IdentityRemapMode mode,
-                                std::uint64_t offset = 0,
-                                std::uint64_t size = 0,
-                                std::string name = {},
-                                IdentityTraceLabels labels = {},
-                                std::source_location at = std::source_location::current()) {
-        map_.register_identity_repeat_window(
-            w, offset, size ? size : w.size, domain, mode, labels, std::move(name), at);
-    }
-    void finish() {
-        map_.finalize();
-    }
-    auto reset() const {
-        return reset_set_->reset();
-    }
-};
-
 } // namespace reg
 // namespace reg
 
