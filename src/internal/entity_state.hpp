@@ -89,7 +89,7 @@ struct SingleIndexPlan : MappedIndexSite {
 struct EntityState {
     using ReadFn = ScalarReadSource;
     using WriteFn = EventCallback;
-    using DeriveFn = std::function<void(RegAccessInfo&)>;
+    using DeriveFn = std::function<AccessFailure(RegAccessInfo&)>;
     // Keep mutable MMIO state together. Diagnostic and snapshot metadata
     // below are not needed by the native scalar execution plan.
     std::shared_ptr<const ReadFn> read_callback;
@@ -275,7 +275,7 @@ struct EntityState {
 };
 RegisterMetadata node_metadata(const EntityState& node);
 struct IdentityResolverSlot {
-    using Function = std::function<std::uint32_t(const IdentityResolveRequest&)>;
+    using Function = std::function<CheckedIndex(const IdentityResolveRequest&)>;
     std::string name;
     std::shared_ptr<const Function> callback;
     CallbackDescription description;

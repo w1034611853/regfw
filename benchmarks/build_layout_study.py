@@ -13,7 +13,7 @@ parser.add_argument('--library', type=Path, required=True)
 parser.add_argument('--out', type=Path, required=True)
 parser.add_argument('--compiler', default='g++')
 parser.add_argument('--hlog', type=Path)
-parser.add_argument('--names', nargs='+', choices=['scalar', 'mmio', 'handles', 'dispatcher', 'init', 'poe'], default=['scalar', 'mmio', 'handles', 'dispatcher', 'init', 'poe'])
+parser.add_argument('--names', nargs='+', choices=['scalar', 'mmio', 'handles', 'dispatcher', 'init', 'poe', 'errors'], default=['scalar', 'mmio', 'handles', 'dispatcher', 'init', 'poe'])
 args = parser.parse_args()
 sdk, archive, out = (args.sdk.resolve(), args.library.resolve(), args.out.resolve())
 source = Path(__file__).resolve().parent
@@ -23,7 +23,7 @@ shutil.copytree(sdk / 'include', out / 'include')
 shutil.copy2(archive, out / 'libregfw.a')
 revision = subprocess.check_output(['git', '-C', str(sdk), 'rev-parse', 'HEAD'], text=True).strip()
 (out / 'revision.json').write_text(json.dumps(dict(commit=revision, library_sha256=hashlib.sha256(archive.read_bytes()).hexdigest()), indent=2) + '\n')
-sources = dict(scalar='mmio_scalar.cpp', mmio='mmio.cpp', handles='handles.cpp', dispatcher='dispatch_layout.cpp', init='init.cpp', poe='poe_init.cpp')
+sources = dict(scalar='mmio_scalar.cpp', mmio='mmio.cpp', handles='handles.cpp', dispatcher='dispatch_layout.cpp', init='init.cpp', poe='poe_init.cpp', errors='mmio_errors.cpp')
 for name in args.names:
     obj = out / (name + '.o')
     flags = [args.compiler, '-std=c++20', '-O3', '-DNDEBUG', '-fno-strict-aliasing', '-I' + str(out / 'include'), '-I' + str(hlog / 'include')]

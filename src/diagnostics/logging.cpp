@@ -42,47 +42,70 @@ void RegisterMap::log_frame(HLogLevel level,
     });
 }
 
+namespace {
+std::string access_error_text(const detail::AccessFailure* failure) {
+    if (!failure)
+        return format_error_chain(std::current_exception());
+    if (!failure->message)
+        return format_error_chain(failure->cause);
+    std::ostringstream text;
+    text << failure->message << failure->subject;
+    if (failure->location.line())
+        text << "\n  at " << failure->location.file_name() << ':' << failure->location.line() << ':'
+             << failure->location.column();
+    if (failure->cause)
+        text << "\n  caused by[1]: " << format_error_chain(failure->cause, 1);
+    return text.str();
+}
+} // namespace
+
 void RegisterMap::log_error(std::string_view phase,
                             std::string_view name,
-                            const detail::ScalarAccessFrame& frame) const noexcept {
+                            const detail::ScalarAccessFrame& frame,
+                            const detail::AccessFailure* failure) const noexcept {
     if (log_enabled(HLOG_LEVEL_ERROR))
         frame.with_info([&](const RegAccessInfo& info) {
-            log_error(phase, name, &info);
+            log_error(phase, name, &info, failure);
         });
 }
 
 void RegisterMap::log_error(std::string_view phase,
                             std::string_view name,
-                            const RegAccessInfo* info) const noexcept {
+                            const RegAccessInfo* info,
+                            const detail::AccessFailure* failure) const noexcept {
     if (!log_enabled(HLOG_LEVEL_ERROR))
         return;
     try {
-        auto text = format_error_chain(std::current_exception());
+        auto text = access_error_text(failure);
         emit_log({HLOG_LEVEL_ERROR, phase, name, info, 0, {}, text});
     } catch (...) {
     }
 }
 
-void RegisterMap::log_request_error(RegTransactionKind kind,
-                                    std::uint64_t address,
-                                    RegData value,
-                                    unsigned size) const noexcept {
-    if (!log_enabled(HLOG_LEVEL_ERROR))
-        return;
-    try {
-        const auto error = format_error_chain(std::current_exception());
-        const detail::FailedAccess request{kind, address, value, size};
-        detail::LogRecord record{HLOG_LEVEL_ERROR,
-                                 kind == RegTransactionKind::Write ? "write" : "read",
-                                 name_prefix,
-                                 nullptr,
-                                 value,
-                                 {},
-                                 error};
-        record.request = &request;
-        emit_log(record);
-    } catch (...) {
-    }
+RegMemTxResult RegisterMap::request_error(RegTransactionKind kind,
+                                          std::uint64_t address,
+                                          RegData value,
+                                          unsigned size,
+                                          const detail::AccessFailure& failure) const noexcept {
+    if (log_enabled(HLOG_LEVEL_ERROR))
+        try {
+            const auto error = access_error_text(&failure);
+            const detail::FailedAccess request{kind, address, value, size};
+            detail::LogRecord record{HLOG_LEVEL_ERROR,
+                                     kind == RegTransactionKind::Write ? "write" : "read",
+                                     name_prefix,
+                                     nullptr,
+                                     value,
+                                     {},
+                                     error};
+            record.request = &request;
+            emit_log(record);
+        } catch (...) {
+        }
+    return failure.kind == ErrorKind::Identity &&
+                   identity_rejection_policy_ == IdentityRejectionPolicy::Ignore
+               ? RegMemTxResult::Ignored
+               : failure.result;
 }
 
 bool RegisterMap::log_enabled(HLogLevel level) const noexcept {

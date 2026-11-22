@@ -75,6 +75,21 @@ enum class ErrorKind {
     Callback,
     Snapshot
 };
+namespace detail {
+constexpr RegMemTxResult access_status(ErrorKind kind) noexcept {
+    switch (kind) {
+        case ErrorKind::Decode:
+            return RegMemTxResult::DecodeError;
+        case ErrorKind::Unsupported:
+            return RegMemTxResult::Unsupported;
+        case ErrorKind::Access:
+        case ErrorKind::Identity:
+            return RegMemTxResult::AccessError;
+        default:
+            return RegMemTxResult::DeviceError;
+    }
+}
+} // namespace detail
 class Error : public std::runtime_error {
   public:
     ErrorKind kind;
@@ -86,12 +101,7 @@ class Error : public std::runtime_error {
                    ErrorKind k = ErrorKind::Device,
                    std::source_location loc = std::source_location::current(),
                    std::exception_ptr source = {})
-        : std::runtime_error(std::move(message)), kind(k),
-          result(k == ErrorKind::Decode        ? RegMemTxResult::DecodeError
-                 : k == ErrorKind::Unsupported ? RegMemTxResult::Unsupported
-                 : k == ErrorKind::Access || k == ErrorKind::Identity
-                     ? RegMemTxResult::AccessError
-                     : RegMemTxResult::DeviceError),
+        : std::runtime_error(std::move(message)), kind(k), result(detail::access_status(k)),
           location(loc), cause(std::move(source)) {
     }
     Error& with_dump(std::string dump) {
@@ -99,6 +109,65 @@ class Error : public std::runtime_error {
         return *this;
     }
 };
+namespace detail {
+// Internal failures keep the result code separate from the category because
+// user-thrown Error may override the default result for its category.
+struct AccessFailure {
+    ErrorKind kind{ErrorKind::Device};
+    RegMemTxResult result{RegMemTxResult::Ok};
+    const char* message{};
+    std::string_view subject;
+    std::source_location location;
+    std::exception_ptr cause;
+
+    AccessFailure() noexcept = default;
+    AccessFailure(ErrorKind kind,
+                  const char* message,
+                  std::string_view subject = {},
+                  std::source_location at = std::source_location::current()) noexcept
+        : kind(kind), result(access_status(kind)), message(message), subject(subject),
+          location(at) {
+    }
+    explicit operator bool() const noexcept {
+        return message || cause;
+    }
+};
+
+template <class F>
+AccessFailure invoke_access_user(F&& call, const char* foreign_message = nullptr) {
+    try {
+        std::forward<F>(call)();
+        return {};
+    } catch (const Error& e) {
+        AccessFailure error;
+        error.kind = e.kind;
+        error.result = e.result;
+        error.cause = std::current_exception();
+        return error;
+    } catch (...) {
+        AccessFailure error{ErrorKind::Device, foreign_message};
+        error.cause = std::current_exception();
+        return error;
+    }
+}
+
+// The callback thunks return the value and a static reason in two words.
+struct CheckedIndex {
+    union {
+        RegData value{};
+        ErrorKind kind;
+    };
+    const char* error{};
+    CheckedIndex() noexcept = default;
+    template <class V>
+        requires std::is_convertible_v<V, RegData>
+    CheckedIndex(V&& value) noexcept(std::is_nothrow_convertible_v<V, RegData>)
+        : value(std::forward<V>(value)) {
+    }
+    CheckedIndex(ErrorKind kind, const char* error) noexcept : kind(kind), error(error) {
+    }
+};
+} // namespace detail
 using RegCallbackError = Error;
 using IdentityResolveError = Error;
 class RegAccessDeriveError : public Error {
@@ -341,25 +410,25 @@ struct RegAccessFieldSet {
                 return &entries[i];
         return nullptr;
     }
-    void insert(const void* key,
-                std::string_view name,
-                RegData value,
-                std::optional<unsigned> dim = {}) {
+    detail::AccessFailure insert(const void* key,
+                                 std::string_view name,
+                                 RegData value,
+                                 std::optional<unsigned> dim = {}) {
         for (std::size_t i = 0; i < size; ++i)
             if (entries[i].key == key) {
                 auto& e = entries[i];
                 if (e.value != value || (e.dimension && dim && e.dimension != dim))
-                    throw RegAccessDeriveError::device_error("conflicting access field: " +
-                                                             std::string(name));
+                    return {ErrorKind::Device, "conflicting access field: ", name};
                 if (!e.dimension)
                     e.dimension = dim;
-                return;
+                return {};
             }
         if (size == entries.size())
-            throw RegAccessDeriveError::device_error("access field capacity exceeded");
+            return {ErrorKind::Device, "access field capacity exceeded"};
         if (!size)
             entries.activate();
         entries[size++] = {key, name, value, dim};
+        return {};
     }
     template <class K>
     auto read(K key) const -> typename K::Value {

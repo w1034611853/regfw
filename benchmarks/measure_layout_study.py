@@ -9,7 +9,7 @@ p.add_argument('--out', required=True)
 p.add_argument('--blocks', type=int, default=4)
 p.add_argument('--iterations', type=int, default=3000000)
 p.add_argument('--cpu', type=int, default=min(os.sched_getaffinity(0)))
-p.add_argument('--groups', nargs='+', choices=['scalar', 'mapped', 'dispatch', 'memory', 'init', 'handles'], default=['scalar', 'mapped', 'dispatch', 'memory', 'init', 'handles'])
+p.add_argument('--groups', nargs='+', choices=['scalar', 'mapped', 'dispatch', 'memory', 'init', 'handles', 'errors'], default=['scalar', 'mapped', 'dispatch', 'memory', 'init', 'handles'])
 p.add_argument('--cases', nargs='+', help='Restrict to exact case names for follow-up measurements')
 a = p.parse_args()
 if min(a.blocks, a.iterations) < 1:
@@ -49,6 +49,10 @@ if 'init' in a.groups:
     add('init-poe', 'poe', [3], 'poe')
 if 'handles' in a.groups:
     add('handles', 'handles', [a.iterations], 'handles')
+if 'errors' in a.groups:
+    for probe in ('hole', 'outside', 'unaligned', 'width'):
+        for w in (0, 1):
+            add(f'error-{probe}-{w}', 'errors', [probe, w, a.iterations], 'error')
 if a.cases:
     selected = set(a.cases)
     available = {case['name'] for case in cases}
@@ -68,6 +72,11 @@ def parse(case, stdout, stderr):
         assert len(f) == 10
         metrics['ns'] = float(f[6])
         checks = f[:6] + f[7:]
+    elif kind == 'error':
+        f = stdout.strip().split()
+        assert len(f) == 3 and f[0] == 'ERROR', stdout
+        metrics['ns'] = float(f[1])
+        checks = [f[2]]
     elif kind == 'mapped':
         for f in lines:
             if f and f[0] == 'RESULT':

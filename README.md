@@ -37,6 +37,9 @@ See [0.37.0 重构报告](RELEASE-REPORT-0.37.0.md), [模块架构说明](docs/A
 
 原始 0.37.0 的重构记录见上面的历史报告；本优化分支额外改变绑定生命周期与流快照格式。
 
+同步分支的平坦寄存器和显式 AddressSpace 共用 FormulaDecoder。旧手动映射 API 的迁移
+及 MMIO 错误结果的实测见 [同步架构精简报告](docs/Performance-Architecture-Sync.md)。
+
 C++20 寄存器框架。`REG_ENTITY` 创建存储，`reg::view(name,size)` 组合可复用的局部布局，`reg::address_space(name)` 将同一 View 挂载到多个 64 位地址入口。框架管理解码、回调、复位、事务与完整快照。
 
 ## 固定布局：单遍运行时生成共享描述（0.36.0 起）

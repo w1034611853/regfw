@@ -50,25 +50,29 @@ RegisterMap::AliasEntry RegisterMap::resolve_static(std::uint64_t address, unsig
     return hole;
 }
 
-REGFW_DETAIL_ALWAYS_INLINE inline AccessIdentity
+REGFW_DETAIL_ALWAYS_INLINE inline detail::AccessFailure
 RegisterMap::resolve_identity(const detail::IdentityWindow& window,
                               const IdentityResolveRequest& request,
+                              AccessIdentity& identity,
                               std::source_location at) const {
     const auto* fn = window.resolver ? window.resolver->callback.get() : identity_resolver_.get();
     if (!fn)
-        throw Error("identity resolver is not configured", ErrorKind::Configuration, at);
-    std::uint32_t id;
-    try {
-        id = (*fn)(request);
-    } catch (const Error&) {
-        throw; // Keep any error category explicitly chosen by the device.
-    } catch (...) {
-        throw Error("identity resolver failed", ErrorKind::Device, at, std::current_exception());
-    }
+        return {ErrorKind::Configuration, "identity resolver is not configured", {}, at};
+    detail::CheckedIndex result;
+    if (auto error = detail::invoke_access_user(
+            [&] {
+                result = (*fn)(request);
+            },
+            "identity resolver failed"))
+        return error;
+    if (result.error)
+        return {ErrorKind::Identity, "identity resolver returned an invalid unsigned ID", {}, at};
+    const auto id = static_cast<std::uint32_t>(result.value);
     if (id >= window.count)
-        throw Error("resolved identity out of range", ErrorKind::Identity, at);
-    return {
+        return {ErrorKind::Identity, "resolved identity out of range", {}, at};
+    identity = {
         window.domain, request.request_id, id, window.mode, request.source, window.trace_labels};
+    return {};
 }
 
 std::tuple<std::uint64_t, AccessRoute, std::optional<AccessIdentity>>
@@ -83,15 +87,21 @@ RegisterMap::resolve_address_with_identity(std::uint64_t address, unsigned size)
     if (source.identity_index) {
         const auto& w = identities_[*source.identity_index];
         if (auto match = w.match(address, size, source.instance)) {
-            auto identity = resolve_identity(w,
-                                             {w.domain,
-                                              match->first,
-                                              address,
-                                              source.target,
-                                              match->second,
-                                              static_cast<std::uint8_t>(size),
-                                              source.route,
-                                              IdentityAddressSource::Bus});
+            AccessIdentity identity;
+            if (auto error = resolve_identity(w,
+                                              {w.domain,
+                                               match->first,
+                                               address,
+                                               source.target,
+                                               match->second,
+                                               static_cast<std::uint8_t>(size),
+                                               source.route,
+                                               IdentityAddressSource::Bus},
+                                              identity)) {
+                if (error.cause && !error.message)
+                    std::rethrow_exception(error.cause); // public throwing query
+                throw Error(error.message, error.kind, error.location, error.cause);
+            }
             if (w.mode == IdentityRemapMode::RedirectBank) {
                 const auto bus =
                     w.base + std::uint64_t(identity.resolved_id) * w.stride + match->second;
@@ -107,36 +117,37 @@ RegisterMap::resolve_address_with_identity(std::uint64_t address, unsigned size)
 }
 
 // Access context: resolve a local/banked address before executing callbacks.
-RegisterMap::Resolution& RegisterMap::resolve(std::uint64_t address,
-                                              unsigned size,
-                                              RegTransactionKind kind,
-                                              RegData value,
-                                              const AliasEntry* selected) {
+detail::AccessFailure RegisterMap::resolve(std::uint64_t address,
+                                           unsigned size,
+                                           RegTransactionKind kind,
+                                           RegData value,
+                                           const AliasEntry* selected) {
     if (!RegisterAccessWidthPolicy::size_bit(size) || (address & (size - 1)))
-        throw Error("invalid/unaligned access", ErrorKind::Unsupported);
+        return {ErrorKind::Unsupported, "invalid/unaligned access"};
     if (address >= size_ || size > size_ - address) {
-        require_initialized();
-        throw Error("address outside map", ErrorKind::Decode);
+        return size_ ? detail::AccessFailure{ErrorKind::Decode, "address outside map"}
+                     : detail::AccessFailure{ErrorKind::Configuration,
+                                             "register map has not been initialized"};
     }
     if (!selected && formula_)
         selected = formula_->decode(address, access_scratch_->decoded[0]);
     if (!selected)
-        throw Error("unmapped entity view address", ErrorKind::Decode);
+        return {ErrorKind::Decode, "unmapped entity view address"};
     return resolve_plan(address, size, kind, value, *selected);
 }
 
-RegisterMap::Resolution& RegisterMap::resolve_plan(std::uint64_t address,
-                                                   unsigned size,
-                                                   RegTransactionKind kind,
-                                                   RegData value,
-                                                   const AliasEntry& source) {
+detail::AccessFailure RegisterMap::resolve_plan(std::uint64_t address,
+                                                unsigned size,
+                                                RegTransactionKind kind,
+                                                RegData value,
+                                                const AliasEntry& source) {
     auto& out = access_scratch_->resolution;
     auto& alias = out.alias;
     auto& identity = out.identity;
     identity.reset();
     auto lane = address & 3;
     if (lane >= source.available || size > source.available - lane)
-        throw Error("access crosses selected view target", ErrorKind::Decode);
+        return {ErrorKind::Decode, "access crosses selected view target"};
     const auto alias_address = source.target + lane;
     const auto* target = &source;
     alias = {alias_address, source.route, source.policy, source.pre_access_chain};
@@ -145,24 +156,28 @@ RegisterMap::Resolution& RegisterMap::resolve_plan(std::uint64_t address,
     if (source.identity_index) {
         const auto& w = identities_[*source.identity_index];
         if (auto match = w.match(address, size, instance)) {
-            identity = resolve_identity(w,
-                                        {w.domain,
-                                         match->first,
-                                         address,
-                                         alias.target,
-                                         match->second,
-                                         static_cast<std::uint8_t>(size),
-                                         alias.route,
-                                         IdentityAddressSource::Bus});
+            AccessIdentity resolved;
+            if (auto error = resolve_identity(w,
+                                              {w.domain,
+                                               match->first,
+                                               address,
+                                               alias.target,
+                                               match->second,
+                                               static_cast<std::uint8_t>(size),
+                                               alias.route,
+                                               IdentityAddressSource::Bus},
+                                              resolved))
+                return error;
+            identity = resolved;
             if (w.mode == IdentityRemapMode::RedirectBank) {
                 const auto bus =
                     w.base + std::uint64_t(identity->resolved_id) * w.stride + match->second;
                 target = formula_->decode(bus, access_scratch_->decoded[1]);
                 if (!target)
-                    throw Error("unmapped entity view address", ErrorKind::Decode);
+                    return {ErrorKind::Decode, "unmapped entity view address"};
                 lane = bus & 3;
                 if (lane >= target->available || size > target->available - lane)
-                    throw Error("access crosses selected view target", ErrorKind::Decode);
+                    return {ErrorKind::Decode, "access crosses selected view target"};
                 if (alias.route.is_direct())
                     alias.route = target->route;
                 alias.policy = alias.policy.intersect(target->policy);
@@ -178,11 +193,11 @@ RegisterMap::Resolution& RegisterMap::resolve_plan(std::uint64_t address,
     auto& n = *e.node;
     if (size == 8) {
         if (alias.target % 8 || e.byte_offset + 8 > n.value_size)
-            throw Error("invalid 64-bit access pair", ErrorKind::Unsupported);
+            return {ErrorKind::Unsupported, "invalid 64-bit access pair"};
     } else {
         const auto target_lane = unsigned(alias.target & 3);
         if (target_lane + size > 4)
-            throw Error("access crosses lookup word", ErrorKind::Unsupported);
+            return {ErrorKind::Unsupported, "access crosses lookup word"};
         e.byte_offset += target_lane;
     }
     out.entry = e;
@@ -203,7 +218,10 @@ RegisterMap::Resolution& RegisterMap::resolve_plan(std::uint64_t address,
     i.register_width_bits = n.value_size * 8;
     i.bus_data = e.byte_offset < 8 ? i.raw_data << (e.byte_offset * 8) : 0;
     i.bus_mask = e.byte_offset < 8 ? detail::low_mask(size * 8) << (e.byte_offset * 8) : 0;
-    i.stored_before = i.stored_after = n.read_scalar(e.linear);
+    if (auto error = detail::invoke_access_user([&] {
+            i.stored_before = i.stored_after = n.read_scalar(e.linear);
+        }))
+        return error;
     i.route = alias.route;
     i.alias_access_policy = alias.policy;
     i.source_instance = instance ? instance : target->instance;
@@ -221,21 +239,22 @@ RegisterMap::Resolution& RegisterMap::resolve_plan(std::uint64_t address,
         i.identity_mode.reset();
         i.identity_source.reset();
     }
-    return out;
+    return {};
 }
 
-void RegisterMap::validate_access(const Resolution& r) const {
+detail::AccessFailure RegisterMap::validate_access(const Resolution& r) const {
     auto& n = *r.entry.node;
     auto& i = r.info;
     if (!n.widths.allows(i.size) || unsigned(i.internal_byte_offset) + i.size > n.value_size ||
         (n.widths.alignment == RegisterAlignment::RegisterBase && i.internal_byte_offset))
-        throw Error("register width/alignment denied", ErrorKind::Unsupported);
+        return {ErrorKind::Unsupported, "register width/alignment denied"};
+    return {};
 }
 
-void RegisterMap::derive(Resolution& r) {
+detail::AccessFailure RegisterMap::derive(Resolution& r) {
     auto& n = *r.entry.node;
     if (n.derivations.empty())
-        return;
+        return {};
     auto& i = r.info;
     if (const auto* plan = n.single_index.get()) {
         i.access_group = n.derivations.front().name;
@@ -244,7 +263,9 @@ void RegisterMap::derive(Resolution& r) {
         i.mapped_fields.entries.activate();
         i.index_fields.entries[0] = {plan->source, plan->source_name, original, plan->dimension};
         i.index_fields.size = 1;
-        const auto value = (*plan->resolver)(i, original);
+        RegData value;
+        if (auto error = plan->resolver->resolve(i, original, value))
+            return error;
         i.mapped_fields.entries[0] = {plan->output,
                                       plan->output_name,
                                       value,
@@ -253,21 +274,24 @@ void RegisterMap::derive(Resolution& r) {
         i.mapped_fields.size = 1;
         if (!plan->metadata_only) {
             if (value >= plan->extent)
-                throw RegAccessDeriveError::access_error("mapped element out of range");
+                return {ErrorKind::Access, "mapped element out of range"};
             if (value != original) {
                 const auto linear = r.entry.linear - original * plan->coefficient +
                                     static_cast<std::uint32_t>(value) * plan->coefficient;
                 r.entry.linear = linear;
                 i.index.linear_value = linear;
                 i.index.values[plan->dimension] = static_cast<std::uint32_t>(value);
-                i.stored_before = i.stored_after = n.read_scalar(linear);
+                return detail::invoke_access_user([&] {
+                    i.stored_before = i.stored_after = n.read_scalar(linear);
+                });
             }
         }
-        return;
+        return {};
     }
     for (const auto& d : n.derivations) {
         i.access_group = d.name;
-        d.callback(i);
+        if (auto error = d.callback(i))
+            return error;
     }
     auto coords = i.request_index.values;
     std::array<std::optional<std::uint32_t>, MAX_REG_DIMS> chosen{};
@@ -278,11 +302,11 @@ void RegisterMap::derive(Resolution& r) {
             continue;
         auto d = *f.dimension;
         if (d >= n.dims.size())
-            throw RegAccessDeriveError::device_error("mapped dimension outside rank");
+            return {ErrorKind::Device, "mapped dimension outside rank"};
         if (f.value > UINT32_MAX || f.value >= n.dims[d])
-            throw RegAccessDeriveError::access_error("mapped element out of range");
+            return {ErrorKind::Access, "mapped element out of range"};
         if (chosen[d] && *chosen[d] != f.value)
-            throw RegAccessDeriveError::device_error("conflicting physical dimension mappings");
+            return {ErrorKind::Device, "conflicting physical dimension mappings"};
         chosen[d] = static_cast<std::uint32_t>(f.value);
         changed |= coords[d] != f.value;
         coords[d] = static_cast<std::uint32_t>(f.value);
@@ -295,22 +319,21 @@ void RegisterMap::derive(Resolution& r) {
         detail::copy_index(i.index, r.entry.view->indices[linear]);
         // Match Rust: access-group remap changes element/index; resolved_address
         // remains the bus/alias/identity address (not a re-encoded element address).
-        i.stored_before = i.stored_after = n.read_scalar(linear);
+        return detail::invoke_access_user([&] {
+            i.stored_before = i.stored_after = n.read_scalar(linear);
+        });
     }
+    return {};
 }
 
 std::optional<RegMemTxResult> RegisterMap::prepare(Resolution& r) {
-    try {
-        validate_access(r);
-        derive(r);
+    auto error = validate_access(r);
+    if (!error)
+        error = derive(r);
+    if (!error)
         return {};
-    } catch (const Error& e) {
-        log_error("access mapping/validation", r.entry.node->name, &r.info);
-        return e.result;
-    } catch (...) {
-        log_error("access mapping/validation", r.entry.node->name, &r.info);
-        return RegMemTxResult::DeviceError;
-    }
+    log_error("access mapping/validation", r.entry.node->name, &r.info, &error);
+    return error.result;
 }
 
 bool RegisterMap::pre(Resolution& r) {
@@ -330,11 +353,11 @@ bool RegisterMap::pre(const Node& node,
         else
             callback.from_frame(0, context);
     };
-    auto report = [&](std::string_view phase) {
+    auto report = [&](std::string_view phase, const detail::AccessFailure* error = nullptr) {
         if constexpr (std::same_as<Context, RegAccessInfo>)
-            log_error(phase, node.name, &context);
+            log_error(phase, node.name, &context, error);
         else
-            log_error(phase, node.name, context);
+            log_error(phase, node.name, context, error);
     };
 
     if (fn)
@@ -346,14 +369,22 @@ bool RegisterMap::pre(const Node& node,
         }
     if (chain)
         for (const auto& step : chain->steps) {
+            const auto* callback = step.slot->callback.get();
+            auto report_step = [&](const detail::AccessFailure* error = nullptr) {
+                if (log_enabled(HLOG_LEVEL_ERROR))
+                    report("view pre_access " + step.slot->name + " @ " + std::string(step.view),
+                           error);
+            };
+            if (!callback) {
+                const detail::AccessFailure error{
+                    ErrorKind::Configuration, "view pre_access is not bound: ", step.slot->name};
+                report_step(&error);
+                return false;
+            }
             try {
-                const auto* callback = step.slot->callback.get();
-                if (!callback)
-                    throw Error("view pre_access is not bound: " + step.slot->name,
-                                ErrorKind::Configuration);
                 invoke(*callback);
             } catch (...) {
-                report("view pre_access " + step.slot->name + " @ " + std::string(step.view));
+                report_step();
                 return false;
             }
         }
@@ -410,34 +441,48 @@ void RegisterMap::complete_read_event(Resolution& r, WideRegData value, bool sou
     }
 }
 
-void RegisterMap::refresh_wide(Resolution& r, WideAccessValues& values) {
+detail::AccessFailure RegisterMap::refresh_wide(Resolution& r, WideAccessValues& values) {
     auto& i = r.info;
     auto& n = *r.entry.node;
     values.raw_data = WideRegData(i.raw_data);
     values.bus_mask = WideRegData(detail::low_mask(i.size * 8)) << (i.internal_byte_offset * 8);
     values.bus_data = values.raw_data << (i.internal_byte_offset * 8);
-    values.stored_before = values.stored_after = n.read_wide(r.entry.linear);
+    if (auto error = detail::invoke_access_user([&] {
+            values.stored_before = values.stored_after = n.read_wide(r.entry.linear);
+        }))
+        return error;
     i.stored_before = i.stored_after = values.stored_before.low_u64();
     i.wide_values = &values;
+    return {};
 }
 
 // Wide-register read/write and multi-beat transaction execution.
-RegMmioWriteResult RegisterMap::write_wide(Resolution& r) {
+RegMmioWriteResult RegisterMap::write_wide(Resolution& r, RegData request_value) {
     auto& n = *r.entry.node;
     auto& i = r.info;
+    const auto failed = [&](const detail::AccessFailure& error) {
+        return RegMmioWriteResult{request_error(i.kind, i.address, request_value, i.size, error)};
+    };
     WideAccessValues values;
     if (!n.derivations.empty() || log_enabled(HLOG_LEVEL_ERROR))
-        refresh_wide(r, values);
+        if (auto error = refresh_wide(r, values))
+            return failed(error);
     if (auto error = prepare(r))
         return {*error};
-    refresh_wide(r, values);
+    if (auto error = refresh_wide(r, values))
+        return failed(error);
     if (!pre(r))
         return {RegMemTxResult::Ignored};
-    auto old = n.read_wide(r.entry.linear), mask = values.bus_mask & n.wide->wide_writable_mask;
-    WideRegData result;
-    result = n.apply_wide_write(old, (old & ~values.bus_mask) | values.bus_data, mask);
-    auto after = ((old & ~mask) | (result & mask)) & n.wide_mask();
-    n.write_wide(r.entry.linear, after);
+    WideRegData old, after;
+    if (auto error = detail::invoke_access_user([&] {
+            old = n.read_wide(r.entry.linear);
+            const auto mask = values.bus_mask & n.wide->wide_writable_mask;
+            const auto result =
+                n.apply_wide_write(old, (old & ~values.bus_mask) | values.bus_data, mask);
+            after = ((old & ~mask) | (result & mask)) & n.wide_mask();
+            n.write_wide(r.entry.linear, after);
+        }))
+        return failed(error);
     values.stored_before = old;
     values.stored_after = after;
     i.stored_before = old.low_u64();
@@ -456,19 +501,28 @@ RegMmioWriteResult RegisterMap::write_wide(Resolution& r) {
 RegMmioReadResult RegisterMap::read_wide(Resolution& r) {
     auto& n = *r.entry.node;
     auto& i = r.info;
+    const auto failed = [&](const detail::AccessFailure& error) {
+        return RegMmioReadResult{INVALID_READ_VALUE & detail::low_mask(i.size * 8),
+                                 request_error(i.kind, i.address, 0, i.size, error)};
+    };
     WideAccessValues values;
     if (!n.derivations.empty() || log_enabled(HLOG_LEVEL_ERROR))
-        refresh_wide(r, values);
+        if (auto error = refresh_wide(r, values))
+            return failed(error);
     if (auto error = prepare(r))
         return {INVALID_READ_VALUE & detail::low_mask(i.size * 8), *error};
-    refresh_wide(r, values);
+    if (auto error = refresh_wide(r, values))
+        return failed(error);
     if (!pre(r))
         return {REG_READ_CALLBACK_ERROR_MAGIC & detail::low_mask(i.size * 8)};
-    auto before = n.read_wide(r.entry.linear), after = before;
-    WideRegData returned;
-    returned = n.apply_wide_read(after, values.bus_mask) & n.wide_mask();
-    after &= n.wide_mask();
-    n.write_wide(r.entry.linear, after);
+    WideRegData before, after, returned;
+    if (auto error = detail::invoke_access_user([&] {
+            before = after = n.read_wide(r.entry.linear);
+            returned = n.apply_wide_read(after, values.bus_mask) & n.wide_mask();
+            after &= n.wide_mask();
+            n.write_wide(r.entry.linear, after);
+        }))
+        return failed(error);
     values.stored_before = before;
     values.stored_after = after;
     i.stored_before = before.low_u64();
@@ -501,27 +555,36 @@ void RegisterMap::write_storage(Node& n, std::size_t index, WideRegData value) {
         n.write_scalar(index, value.low_u64());
 }
 
-void RegisterMap::transaction_values(Resolution& r, WideAccessValues& values) {
+detail::AccessFailure RegisterMap::transaction_values(Resolution& r, WideAccessValues& values) {
     auto& i = r.info;
     auto& n = *r.entry.node;
     values.raw_data = WideRegData(i.raw_data);
     values.bus_mask = WideRegData(detail::low_mask(i.size * 8)) << (i.internal_byte_offset * 8);
     values.bus_data = values.raw_data << (i.internal_byte_offset * 8);
-    values.stored_before = values.stored_after = read_storage(n, r.entry.linear);
+    if (auto error = detail::invoke_access_user([&] {
+            values.stored_before = values.stored_after = read_storage(n, r.entry.linear);
+        }))
+        return error;
     if (n.is_wide())
         i.wide_values = &values;
     i.stored_before = i.stored_after = values.stored_before.low_u64();
+    return {};
 }
 
-RegMmioWriteResult RegisterMap::write_transaction(Resolution& r) {
+RegMmioWriteResult RegisterMap::write_transaction(Resolution& r, RegData request_value) {
     auto& n = *r.entry.node;
     auto& i = r.info;
+    const auto failed = [&](const detail::AccessFailure& error) {
+        return RegMmioWriteResult{request_error(i.kind, i.address, request_value, i.size, error)};
+    };
     WideAccessValues values;
     if (!n.derivations.empty() || log_enabled(HLOG_LEVEL_ERROR))
-        transaction_values(r, values);
+        if (auto error = transaction_values(r, values))
+            return failed(error);
     if (auto error = prepare(r))
         return {*error};
-    transaction_values(r, values);
+    if (auto error = transaction_values(r, values))
+        return failed(error);
     if (!pre(r))
         return {RegMemTxResult::Ignored};
     auto& state = n.transaction_state[r.entry.linear];
@@ -537,25 +600,24 @@ RegMmioWriteResult RegisterMap::write_transaction(Resolution& r) {
         access_log(r, i.raw_data, "stage-write");
         return {};
     }
-    auto old = read_storage(n, r.entry.linear);
     values.bus_data = pending;
     values.bus_mask = mask;
     i.bus_data = pending.low_u64();
     i.bus_mask = mask.low_u64();
     auto effective =
         mask & (n.is_wide() ? n.wide->wide_writable_mask : WideRegData(n.writable_mask));
-    WideRegData result;
-    {
-        auto merged = (old & ~mask) | pending;
-        if (n.is_wide())
-            result = n.apply_wide_write(old, merged, effective);
-        else
-            result =
-                WideRegData(n.apply_write(old.low_u64(), merged.low_u64(), effective.low_u64()));
-    }
-    auto after = (old & ~effective) | (result & effective);
-    write_storage(n, r.entry.linear, after);
-    after = read_storage(n, r.entry.linear);
+    WideRegData old, after;
+    if (auto error = detail::invoke_access_user([&] {
+            old = read_storage(n, r.entry.linear);
+            const auto merged = (old & ~mask) | pending;
+            const auto result = n.is_wide()
+                                    ? n.apply_wide_write(old, merged, effective)
+                                    : WideRegData(n.apply_write(
+                                          old.low_u64(), merged.low_u64(), effective.low_u64()));
+            write_storage(n, r.entry.linear, (old & ~effective) | (result & effective));
+            after = read_storage(n, r.entry.linear);
+        }))
+        return failed(error);
     state.write_pending = {};
     state.write_mask = {};
     values.stored_before = old;
@@ -586,12 +648,18 @@ RegMmioWriteResult RegisterMap::write_transaction(Resolution& r) {
 RegMmioReadResult RegisterMap::read_transaction(Resolution& r) {
     auto& n = *r.entry.node;
     auto& i = r.info;
+    const auto failed = [&](const detail::AccessFailure& error) {
+        return RegMmioReadResult{INVALID_READ_VALUE & detail::low_mask(i.size * 8),
+                                 request_error(i.kind, i.address, 0, i.size, error)};
+    };
     WideAccessValues values;
     if (!n.derivations.empty() || log_enabled(HLOG_LEVEL_ERROR))
-        transaction_values(r, values);
+        if (auto error = transaction_values(r, values))
+            return failed(error);
     if (auto error = prepare(r))
         return {INVALID_READ_VALUE & detail::low_mask(i.size * 8), *error};
-    transaction_values(r, values);
+    if (auto error = transaction_values(r, values))
+        return failed(error);
     if (!pre(r))
         return {REG_READ_CALLBACK_ERROR_MAGIC & detail::low_mask(i.size * 8)};
     auto& state = n.transaction_state[r.entry.linear];
@@ -621,19 +689,21 @@ RegMmioReadResult RegisterMap::read_transaction(Resolution& r) {
     WideRegData returned;
     if (start) {
         state.has_read_snapshot = false;
-        auto before = read_storage(n, r.entry.linear), after = before;
+        WideRegData before, after;
         auto all = WideRegData::mask(n.value_size * 8);
-        {
-            if (n.is_wide())
-                returned = n.apply_wide_read(after, all) & all;
-            else {
-                auto scalar = after.low_u64();
-                returned = WideRegData(n.apply_read(scalar, all.low_u64()));
-                after = WideRegData(scalar);
-            }
-        }
-        write_storage(n, r.entry.linear, after);
-        after = read_storage(n, r.entry.linear);
+        if (auto error = detail::invoke_access_user([&] {
+                before = after = read_storage(n, r.entry.linear);
+                if (n.is_wide())
+                    returned = n.apply_wide_read(after, all) & all;
+                else {
+                    auto scalar = after.low_u64();
+                    returned = WideRegData(n.apply_read(scalar, all.low_u64()));
+                    after = WideRegData(scalar);
+                }
+                write_storage(n, r.entry.linear, after);
+                after = read_storage(n, r.entry.linear);
+            }))
+            return failed(error);
         values.stored_before = before;
         values.stored_after = after;
         i.stored_before = before.low_u64();
@@ -778,15 +848,24 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
         const auto& w = identities_[origin.identity_index];
         const auto request = origin.request_id;
         const auto inner = origin.mount_inner + (address - origin.mount->base);
-        identity = resolve_identity(w,
-                                    {w.domain,
-                                     request,
-                                     address,
-                                     source_address,
-                                     inner,
-                                     4,
-                                     route,
-                                     IdentityAddressSource::Bus});
+        AccessIdentity resolved;
+        if (auto error = resolve_identity(w,
+                                          {w.domain,
+                                           request,
+                                           address,
+                                           source_address,
+                                           inner,
+                                           4,
+                                           route,
+                                           IdentityAddressSource::Bus},
+                                          resolved))
+            return {Writing ? 0 : INVALID_READ_VALUE & 0xffffffff,
+                    request_error(Writing ? RegTransactionKind::Write : RegTransactionKind::Read,
+                                  address,
+                                  value,
+                                  4,
+                                  error)};
+        identity = resolved;
         if (w.mode == IdentityRemapMode::RedirectBank) {
             const auto id = identity->resolved_id;
             const auto bus = w.base + std::uint64_t(id) * w.stride + inner;
@@ -879,37 +958,35 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
                                      : RegMemTxResult::AccessError};
     }
     if (plan) {
-        auto failed = [&](RegMemTxResult result) {
+        auto failed = [&](const detail::AccessFailure& error) {
             if (log_enabled(HLOG_LEVEL_ERROR)) {
                 if (deferred)
                     populate();
-                log_error("access mapping/validation", n.name, frame);
+                log_error("access mapping/validation", n.name, frame, &error);
             }
-            return RegMmioReadResult{writing ? 0 : invalid, result};
+            return RegMmioReadResult{writing ? 0 : invalid, error.result};
         };
-        try {
-            if (!resolver)
-                throw RegAccessDeriveError::device_error("access resolver is not bound: " +
-                                                         plan->resolver->name);
-            if (resolver->coordinate_only()) {
-                const auto id = identity ? identity->resolved_id
-                                         : instance.value_or(bound.instance.value_or(0));
-                mapped.mapped = resolver->from_coordinates(id, logical);
-            } else {
-                mapped.mapped = resolver->from_frame(frame);
-            }
-            mapped.has_mapped = true;
-            if (mapped.mapped >= plan->extent)
-                throw RegAccessDeriveError::access_error("mapped element out of range");
-            mapped.index_valid = true;
-            if (mapped.mapped != logical)
-                linear = linear - logical * plan->coefficient +
-                         static_cast<std::uint32_t>(mapped.mapped) * plan->coefficient;
-        } catch (const Error& error) {
-            return failed(error.result);
-        } catch (...) {
-            return failed(RegMemTxResult::DeviceError);
-        }
+        if (!resolver)
+            return failed(
+                {ErrorKind::Device, "access resolver is not bound: ", plan->resolver->name});
+        if (auto error = detail::invoke_index_resolver(
+                [&] {
+                    if (resolver->coordinate_only()) {
+                        const auto id = identity ? identity->resolved_id
+                                                 : instance.value_or(bound.instance.value_or(0));
+                        return resolver->from_coordinates(id, logical);
+                    }
+                    return resolver->from_frame(frame);
+                },
+                mapped.mapped))
+            return failed(error);
+        mapped.has_mapped = true;
+        if (mapped.mapped >= plan->extent)
+            return failed({ErrorKind::Access, "mapped element out of range"});
+        mapped.index_valid = true;
+        if (mapped.mapped != logical)
+            linear = linear - logical * plan->coefficient +
+                     static_cast<std::uint32_t>(mapped.mapped) * plan->coefficient;
         if (unobserved && access_log_level(n) == HLOG_LEVEL_OFF)
             return plain(linear, word_at(linear));
         if (deferred)
@@ -945,7 +1022,15 @@ REGFW_DETAIL_ALWAYS_INLINE inline std::optional<RegMmioReadResult> RegisterMap::
 
     detail::FormulaDecoder::PreparedHit hit;
     if (!formula_->find_prepared(address, hit))
-        return {};
+        return RegMmioReadResult{
+            Writing ? 0 : INVALID_READ_VALUE & 0xffffffff,
+            request_error(
+                Writing ? RegTransactionKind::Write : RegTransactionKind::Read,
+                address,
+                value,
+                size,
+                {ErrorKind::Decode,
+                 address < size_ ? "unmapped entity view address" : "address outside map"})};
     const auto& context = *hit.context;
     using Path = detail::FormulaDecoder::Path;
     const auto path = Writing ? context.write_path : context.read_path;
@@ -970,124 +1055,113 @@ REGFW_DETAIL_ALWAYS_INLINE inline std::optional<RegMmioReadResult> RegisterMap::
 // Public MMIO entry points and QEMU adapters.
 RegMmioWriteResult
 RegisterMap::try_mmio_write_sized(std::uint64_t address, RegData value, unsigned size) {
-    try {
-        if (logger_ && size < sizeof(value) && (value >> (size * 8)) &&
-            RegisterAccessWidthPolicy::size_bit(size))
-            warn_truncated_write(address, value, size);
-        const AliasEntry* selected = nullptr;
-        if (auto fast = try_fast_mmio<true>(address, value, size, selected))
-            return {fast->result};
-        auto& r = resolve(address, size, RegTransactionKind::Write, value, selected);
-        auto& n = *r.entry.node;
-        auto& i = r.info;
-        if (!r.alias.policy.allow_write) {
-            emit_log({HLOG_LEVEL_WARN, "alias write denied", n.name, &i, value, {}, {}, nullptr});
-            return {r.alias.policy.denied_write == DeniedAccessAction::Ignore
-                        ? RegMemTxResult::Ignored
-                        : RegMemTxResult::AccessError};
-        }
-        if (!n.custom_behavior && n.builtin == Access::Ro) {
-            validate_access(r);
-            access_log(r, i.raw_data, "ignored-read-only");
-            return {RegMemTxResult::Ignored};
-        }
-        if (n.transaction_policy.write != SplitWriteMode::Independent)
-            return write_transaction(r);
-        if (n.is_wide())
-            return write_wide(r);
-        if (auto error = prepare(r))
-            return {*error};
-        if (!pre(r))
-            return {RegMemTxResult::Ignored};
-        auto index = r.entry.linear;
-        auto old = n.read_scalar(index), mask = i.bus_mask & n.writable_mask;
-        RegData result;
-        result = n.apply_write(old, (old & ~i.bus_mask) | i.bus_data, mask);
-        n.write_scalar(index, ((old & ~mask) | (result & mask)) & n.value_mask());
-        i.stored_before = old;
-        i.stored_after = n.read_scalar(index);
-        access_log(r, i.stored_after);
-        const auto* fn = n.write_callback.get();
-        if (fn)
-            try {
-                (*fn)(old, i);
-            } catch (...) {
-                log_error("on_write", n.name, &i);
-            }
-        return {};
-    } catch (const Error& e) {
-        log_request_error(RegTransactionKind::Write, address, value, size);
-        return {e.kind == ErrorKind::Identity &&
-                        identity_rejection_policy_ == IdentityRejectionPolicy::Ignore
+    if (logger_ && size < sizeof(value) && (value >> (size * 8)) &&
+        RegisterAccessWidthPolicy::size_bit(size))
+        warn_truncated_write(address, value, size);
+    const AliasEntry* selected = nullptr;
+    if (auto fast = try_fast_mmio<true>(address, value, size, selected))
+        return {fast->result};
+    if (auto error = resolve(address, size, RegTransactionKind::Write, value, selected))
+        return {request_error(RegTransactionKind::Write, address, value, size, error)};
+    auto& r = access_scratch_->resolution;
+    auto& n = *r.entry.node;
+    auto& i = r.info;
+    if (!r.alias.policy.allow_write) {
+        emit_log({HLOG_LEVEL_WARN, "alias write denied", n.name, &i, value, {}, {}, nullptr});
+        return {r.alias.policy.denied_write == DeniedAccessAction::Ignore
                     ? RegMemTxResult::Ignored
-                    : e.result};
-    } catch (...) {
-        log_request_error(RegTransactionKind::Write, address, value, size);
-        return {RegMemTxResult::DeviceError};
+                    : RegMemTxResult::AccessError};
     }
+    if (!n.custom_behavior && n.builtin == Access::Ro) {
+        if (auto error = validate_access(r))
+            return {request_error(i.kind, address, value, size, error)};
+        access_log(r, i.raw_data, "ignored-read-only");
+        return {RegMemTxResult::Ignored};
+    }
+    if (n.transaction_policy.write != SplitWriteMode::Independent)
+        return write_transaction(r, value);
+    if (n.is_wide())
+        return write_wide(r, value);
+    if (auto error = prepare(r))
+        return {*error};
+    if (!pre(r))
+        return {RegMemTxResult::Ignored};
+    auto index = r.entry.linear;
+    RegData old{};
+    if (auto error = detail::invoke_access_user([&] {
+            old = n.read_scalar(index);
+            const auto mask = i.bus_mask & n.writable_mask;
+            const auto result = n.apply_write(old, (old & ~i.bus_mask) | i.bus_data, mask);
+            n.write_scalar(index, ((old & ~mask) | (result & mask)) & n.value_mask());
+            i.stored_before = old;
+            i.stored_after = n.read_scalar(index);
+        }))
+        return {request_error(i.kind, address, value, size, error)};
+    access_log(r, i.stored_after);
+    const auto* fn = n.write_callback.get();
+    if (fn)
+        try {
+            (*fn)(old, i);
+        } catch (...) {
+            log_error("on_write", n.name, &i);
+        }
+    return {};
 }
 
 RegMmioReadResult RegisterMap::try_mmio_read_sized(std::uint64_t address, unsigned size) {
     const auto invalid = RegisterAccessWidthPolicy::size_bit(size)
                              ? INVALID_READ_VALUE & detail::low_mask(size * 8)
                              : 0;
-    try {
-        const AliasEntry* selected = nullptr;
-        if (auto fast = try_fast_mmio<false>(address, 0, size, selected))
-            return *fast;
-        auto& r = resolve(address, size, RegTransactionKind::Read, 0, selected);
-        auto& n = *r.entry.node;
-        auto& i = r.info;
-        if (!r.alias.policy.allow_read) {
-            emit_log({HLOG_LEVEL_WARN, "alias read denied", n.name, &i, 0, {}, {}, nullptr});
-            return {invalid,
-                    r.alias.policy.denied_read == DeniedAccessAction::Ignore
-                        ? RegMemTxResult::Ignored
-                        : RegMemTxResult::AccessError};
-        }
-        if (n.transaction_policy.read != SplitReadMode::Independent)
-            return read_transaction(r);
-        if (n.is_wide())
-            return read_wide(r);
-        if (auto error = prepare(r))
-            return {invalid, *error};
-        if (!pre(r))
-            return {REG_READ_CALLBACK_ERROR_MAGIC & detail::low_mask(size * 8), RegMemTxResult::Ok};
-        auto index = r.entry.linear;
-        auto shift = i.internal_byte_offset * 8;
-        auto before = n.read_scalar(index), after = before;
-        RegData returned;
-        returned = n.apply_read(after, i.bus_mask) & n.value_mask();
-        if (!n.scalar_data || n.custom_behavior || after != before)
-            n.write_scalar(index, after & n.value_mask());
-        i.stored_before = before;
-        i.stored_after = n.scalar_data ? (after & n.value_mask()) : n.read_scalar(index);
-        const auto* fn = n.read_callback.get();
-        bool source_ok = true;
-        if (fn)
-            try {
-                returned = (*fn)(returned, i) & n.value_mask();
-            } catch (...) {
-                log_error("on_read", n.name, &i);
-                source_ok = false;
-                returned = REG_READ_CALLBACK_ERROR_MAGIC & n.value_mask();
-            }
-        auto lane = (returned >> shift) & detail::low_mask(size * 8);
-        access_log(r, lane);
-        if (n.read_complete_callback)
-            complete_read_event(r, WideRegData(returned), source_ok);
-        return {lane};
-    } catch (const Error& e) {
-        log_request_error(RegTransactionKind::Read, address, 0, size);
+    const AliasEntry* selected = nullptr;
+    if (auto fast = try_fast_mmio<false>(address, 0, size, selected))
+        return *fast;
+    if (auto error = resolve(address, size, RegTransactionKind::Read, 0, selected))
+        return {invalid, request_error(RegTransactionKind::Read, address, 0, size, error)};
+    auto& r = access_scratch_->resolution;
+    auto& n = *r.entry.node;
+    auto& i = r.info;
+    if (!r.alias.policy.allow_read) {
+        emit_log({HLOG_LEVEL_WARN, "alias read denied", n.name, &i, 0, {}, {}, nullptr});
         return {invalid,
-                e.kind == ErrorKind::Identity &&
-                        identity_rejection_policy_ == IdentityRejectionPolicy::Ignore
+                r.alias.policy.denied_read == DeniedAccessAction::Ignore
                     ? RegMemTxResult::Ignored
-                    : e.result};
-    } catch (...) {
-        log_request_error(RegTransactionKind::Read, address, 0, size);
-        return {invalid, RegMemTxResult::DeviceError};
+                    : RegMemTxResult::AccessError};
     }
+    if (n.transaction_policy.read != SplitReadMode::Independent)
+        return read_transaction(r);
+    if (n.is_wide())
+        return read_wide(r);
+    if (auto error = prepare(r))
+        return {invalid, *error};
+    if (!pre(r))
+        return {REG_READ_CALLBACK_ERROR_MAGIC & detail::low_mask(size * 8), RegMemTxResult::Ok};
+    auto index = r.entry.linear;
+    auto shift = i.internal_byte_offset * 8;
+    RegData returned{};
+    if (auto error = detail::invoke_access_user([&] {
+            auto before = n.read_scalar(index), after = before;
+            returned = n.apply_read(after, i.bus_mask) & n.value_mask();
+            if (!n.scalar_data || n.custom_behavior || after != before)
+                n.write_scalar(index, after & n.value_mask());
+            i.stored_before = before;
+            i.stored_after = n.scalar_data ? (after & n.value_mask()) : n.read_scalar(index);
+        }))
+        return {invalid, request_error(i.kind, address, 0, size, error)};
+    const auto* fn = n.read_callback.get();
+    bool source_ok = true;
+    if (fn)
+        try {
+            returned = (*fn)(returned, i) & n.value_mask();
+        } catch (...) {
+            log_error("on_read", n.name, &i);
+            source_ok = false;
+            returned = REG_READ_CALLBACK_ERROR_MAGIC & n.value_mask();
+        }
+    auto lane = (returned >> shift) & detail::low_mask(size * 8);
+    access_log(r, lane);
+    if (n.read_complete_callback)
+        complete_read_event(r, WideRegData(returned), source_ok);
+    return {lane};
 }
 
 RegData RegisterMap::mmio_read_sized(std::uint64_t a, unsigned s) {

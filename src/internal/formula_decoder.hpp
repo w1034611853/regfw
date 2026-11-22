@@ -453,6 +453,17 @@ class FormulaDecoder {
         }
     }
     bool lookup_prepared(std::uint64_t word, PreparedHit& hit) const noexcept {
+        auto in_view = [&](const EntityView& view) {
+            const auto* found = view.layout->find(word - view.base);
+            if (!found)
+                return false;
+            hit = {&view, &view.prepared[found->ordinal], found};
+            return true;
+        };
+        if (entity_views_.size() == 1) {
+            const auto& view = entity_views_.front();
+            return word >= view.base && word < view.end && in_view(view);
+        }
         std::size_t low = 0, high = view_bases_.size();
         while (low < high) {
             const auto mid = low + (high - low) / 2;
@@ -467,12 +478,7 @@ class FormulaDecoder {
         if (view_metas_[top].isolated) {
             if (word >= view_metas_[top].end)
                 return false;
-            const auto& view = entity_views_[top];
-            const auto* found = view.layout->find(word - view_bases_[top]);
-            if (!found)
-                return false;
-            hit = {&view, &view.prepared[found->ordinal], found};
-            return true;
+            return in_view(entity_views_[top]);
         }
         const Mount* winner = nullptr;
         while (low) {

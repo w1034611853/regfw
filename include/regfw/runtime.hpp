@@ -774,14 +774,26 @@ std::string join_name(std::string_view prefix, std::string_view name);
 } // namespace detail
 namespace detail {
 template <class V, class R>
-RegData checked_access_result(R result) {
+CheckedIndex checked_access_result(R result) {
     if constexpr (std::signed_integral<R>)
         if (result < 0)
-            throw RegAccessDeriveError::access_error("negative mapped element");
+            return {ErrorKind::Access, "negative mapped element"};
     if constexpr (std::integral<V>)
         if (detail::to_bits(result) > std::numeric_limits<V>::max())
-            throw RegAccessDeriveError::access_error("mapped value exceeds declared field type");
-    return detail::to_bits(detail::value_from_data<V>(detail::to_bits(result)));
+            return {ErrorKind::Access, "mapped value exceeds declared field type"};
+    return {detail::to_bits(detail::value_from_data<V>(detail::to_bits(result)))};
+}
+template <class F>
+AccessFailure invoke_index_resolver(F&& fn, RegData& value) {
+    CheckedIndex result;
+    if (auto error = invoke_access_user([&] {
+            result = fn();
+        }))
+        return error;
+    if (result.error)
+        return {result.kind, result.error};
+    value = result.value;
+    return {};
 }
 } // namespace detail
 namespace detail {
@@ -795,9 +807,9 @@ struct PreAccessSlot {
 };
 struct AccessResolverSlot {
     class Function final : public CallbackStorage {
-        using Full = RegData (*)(void*, const RegAccessInfo&);
-        using Frame = RegData (*)(void*, const ScalarAccessFrame&);
-        using Coordinates = RegData (*)(void*, std::uint32_t, RegData);
+        using Full = CheckedIndex (*)(void*, const RegAccessInfo&);
+        using Frame = CheckedIndex (*)(void*, const ScalarAccessFrame&);
+        using Coordinates = CheckedIndex (*)(void*, std::uint32_t, RegData);
         Full full_{};
         Frame frame_{};
         Coordinates coordinates_{};
@@ -812,13 +824,13 @@ struct AccessResolverSlot {
         bool coordinate_only() const noexcept {
             return coordinates_ != nullptr;
         }
-        RegData from_coordinates(std::uint32_t vf, RegData logical) const {
+        CheckedIndex from_coordinates(std::uint32_t vf, RegData logical) const {
             return coordinates_(target(), vf, logical);
         }
-        RegData from_frame(const ScalarAccessFrame& frame) const {
+        CheckedIndex from_frame(const ScalarAccessFrame& frame) const {
             return frame_(target(), frame);
         }
-        RegData operator()(const RegAccessInfo& i, RegData logical) const {
+        CheckedIndex operator()(const RegAccessInfo& i, RegData logical) const {
             if (full_)
                 return full_(target(), i);
             return from_coordinates(i.resolved_identity.value_or(i.source_instance.value_or(0)),
@@ -830,11 +842,15 @@ struct AccessResolverSlot {
     CallbackDescription description;
     bool deferred{};
     bool required{};
-    RegData operator()(const RegAccessInfo& info, RegData logical) const {
+    AccessFailure resolve(const RegAccessInfo& info, RegData logical, RegData& out) const {
         const auto* fn = callback.get();
         if (!fn)
-            throw RegAccessDeriveError::device_error("access resolver is not bound: " + name);
-        return (*fn)(info, logical);
+            return {ErrorKind::Device, "access resolver is not bound: ", name};
+        return invoke_index_resolver(
+            [&] {
+                return (*fn)(info, logical);
+            },
+            out);
     }
 };
 } // namespace detail
@@ -876,7 +892,7 @@ class RegisterMap {
     bool finalized_{};
     static std::uint64_t checked_map_size(std::uint64_t size);
     void require_initialized() const;
-    using IdentityFn = std::function<std::uint32_t(const IdentityResolveRequest&)>;
+    using IdentityFn = std::function<detail::CheckedIndex(const IdentityResolveRequest&)>;
     using PreFn = detail::PreAccessSlot::Function;
     std::shared_ptr<const IdentityFn> identity_resolver_;
     detail::CallbackDescription identity_description_;
@@ -930,21 +946,22 @@ class RegisterMap {
     void mutable_bindings() const;
     void region_check(std::uint64_t base, std::uint64_t n) const;
     AliasEntry resolve_static(std::uint64_t address, unsigned size) const;
-    inline AccessIdentity
+    inline detail::AccessFailure
     resolve_identity(const detail::IdentityWindow& window,
                      const IdentityResolveRequest& request,
+                     AccessIdentity& identity,
                      std::source_location at = std::source_location::current()) const;
     void install_default_layout();
-    Resolution& resolve(std::uint64_t address,
-                        unsigned size,
-                        RegTransactionKind kind,
-                        RegData value,
-                        const AliasEntry* selected = nullptr);
-    Resolution& resolve_plan(std::uint64_t address,
-                             unsigned size,
-                             RegTransactionKind kind,
-                             RegData value,
-                             const AliasEntry& selected);
+    detail::AccessFailure resolve(std::uint64_t address,
+                                  unsigned size,
+                                  RegTransactionKind kind,
+                                  RegData value,
+                                  const AliasEntry* selected = nullptr);
+    detail::AccessFailure resolve_plan(std::uint64_t address,
+                                       unsigned size,
+                                       RegTransactionKind kind,
+                                       RegData value,
+                                       const AliasEntry& selected);
     template <bool Writing>
     std::optional<RegMmioReadResult>
     try_fast_mmio(std::uint64_t address, RegData value, unsigned size, const AliasEntry*& selected);
@@ -961,8 +978,8 @@ class RegisterMap {
     execute_scalar(Node& node, std::byte* data, detail::ScalarAccessFrame& frame, Log&& log);
     template <bool Writing, class Selection>
     RegMmioReadResult mapped_scalar(std::uint64_t address, RegData value, const Selection& source);
-    void validate_access(const Resolution& r) const;
-    void derive(Resolution& r);
+    detail::AccessFailure validate_access(const Resolution& r) const;
+    detail::AccessFailure derive(Resolution& r);
     std::optional<RegMemTxResult> prepare(Resolution& r);
     bool pre(Resolution& r);
     template <class Context>
@@ -977,24 +994,27 @@ class RegisterMap {
                    RegData value) const noexcept;
     void log_error(std::string_view phase,
                    std::string_view name,
-                   const detail::ScalarAccessFrame& frame) const noexcept;
+                   const detail::ScalarAccessFrame& frame,
+                   const detail::AccessFailure* failure = nullptr) const noexcept;
     void log_error(std::string_view phase,
                    std::string_view name,
-                   const RegAccessInfo* info = nullptr) const noexcept;
-    void log_request_error(RegTransactionKind kind,
-                           std::uint64_t address,
-                           RegData value,
-                           unsigned size) const noexcept;
+                   const RegAccessInfo* info = nullptr,
+                   const detail::AccessFailure* failure = nullptr) const noexcept;
+    RegMemTxResult request_error(RegTransactionKind kind,
+                                 std::uint64_t address,
+                                 RegData value,
+                                 unsigned size,
+                                 const detail::AccessFailure& failure) const noexcept;
     void validate_resolver_bindings() const;
     void warn_truncated_write(std::uint64_t address, RegData value, unsigned size) const noexcept;
     void complete_read_event(Resolution& r, WideRegData value, bool source_ok = true);
-    void refresh_wide(Resolution& r, WideAccessValues& values);
-    RegMmioWriteResult write_wide(Resolution& r);
+    detail::AccessFailure refresh_wide(Resolution& r, WideAccessValues& values);
+    RegMmioWriteResult write_wide(Resolution& r, RegData request_value);
     RegMmioReadResult read_wide(Resolution& r);
     WideRegData read_storage(const Node& n, std::size_t index) const;
     void write_storage(Node& n, std::size_t index, WideRegData value);
-    void transaction_values(Resolution& r, WideAccessValues& values);
-    RegMmioWriteResult write_transaction(Resolution& r);
+    detail::AccessFailure transaction_values(Resolution& r, WideAccessValues& values);
+    RegMmioWriteResult write_transaction(Resolution& r, RegData request_value);
     RegMmioReadResult read_transaction(Resolution& r);
 
   public:
@@ -1086,8 +1106,7 @@ class RegisterMap {
   public:
     template <class F>
     void set_identity_resolver(F f, std::source_location at = std::source_location::current()) {
-        bind_identity_resolver(std::make_shared<const IdentityFn>(std::move(f)),
-                               detail::callback_description<F>({}, at));
+        set_identity_resolver(std::string_view{}, std::move(f), at);
     }
     template <class F>
     void set_identity_resolver(std::string_view name,
@@ -1109,18 +1128,8 @@ class RegisterMap {
                                std::source_location at = std::source_location::current()) {
         static_assert(std::same_as<V, std::uint32_t>,
                       "window identity resolver key must have uint32_t value type");
-        auto callback =
-            [f = std::move(f)](const IdentityResolveRequest& request) mutable -> std::uint32_t {
-            const auto result = std::invoke(f, request);
-            try {
-                return detail::value_from_data<std::uint32_t>(
-                    detail::checked_access_result<std::uint32_t>(result));
-            } catch (const RegAccessDeriveError& e) {
-                if (e.result == RegMemTxResult::AccessError)
-                    throw Error("identity resolver returned an invalid unsigned ID",
-                                ErrorKind::Identity);
-                throw;
-            }
+        auto callback = [f = std::move(f)](const IdentityResolveRequest& request) mutable {
+            return detail::checked_access_result<std::uint32_t>(std::invoke(f, request));
         };
         bind_window_resolver(key.id(),
                              key.name,

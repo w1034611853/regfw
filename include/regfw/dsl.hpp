@@ -43,7 +43,7 @@ class Groups {
         const void* source{};
         std::string_view source_name;
         std::function<bool(const RegAccessInfo&)> condition;
-        std::function<RegData(const RegAccessInfo&)> resolver;
+        std::function<detail::CheckedIndex(const RegAccessInfo&, RegData)> resolver;
         std::shared_ptr<detail::AccessResolverSlot> resolver_slot;
         std::function<void(RegisterMap&)> bind;
         const void* fallback{};
@@ -62,7 +62,7 @@ class Groups {
         std::vector<Member> members;
         std::vector<Coordinate> coordinates;
         std::vector<std::shared_ptr<Derivation>> derivations;
-        void run(RegAccessInfo& info) const;
+        detail::AccessFailure run(RegAccessInfo& info) const;
     };
     std::vector<std::shared_ptr<Plan>> plans_;
 
@@ -92,9 +92,9 @@ class Groups {
                 static_cast<std::uint32_t>(coefficient)};
     }
     static void install_index(detail::EntityState* node, detail::StaticIndexRule rule);
-    static void apply_index(const detail::StaticIndexRule& rule,
-                            const detail::AccessResolverSlot& slot,
-                            RegAccessInfo& info);
+    static detail::AccessFailure apply_index(const detail::StaticIndexRule& rule,
+                                             const detail::AccessResolverSlot& slot,
+                                             RegAccessInfo& info);
     template <class Output, class Source>
     class DeriveBuilder;
     struct NoSource {};
@@ -172,22 +172,19 @@ class Groups {
             rule_->resolver_key = nullptr;
             rule_->resolver_name = {};
             rule_->resolver_description = detail::callback_description<F>(name, at);
-            auto source_id = rule_->source;
-            rule_->resolver = [f = std::move(f),
-                               source_id](const RegAccessInfo& info) mutable -> RegData {
-                auto p = info.index_fields.get(source_id);
-                if (!p)
-                    throw RegAccessDeriveError::device_error("missing resolver source");
-                auto v = detail::value_from_data<typename Source::Value>(p->value);
-                auto call = [&]() {
-                    if constexpr (std::is_invocable_v<F&, const RegAccessInfo&>)
-                        return std::invoke(f, info);
-                    else if constexpr (std::is_invocable_v<F&, std::uint32_t, decltype(v)>)
-                        return std::invoke(f, info.resolved_id(), v);
-                    else
-                        return std::invoke(f, v);
-                };
-                return detail::checked_access_result<typename Output::Value>(call());
+            rule_->resolver = [f = std::move(f)](const RegAccessInfo& info,
+                                                 RegData logical) mutable -> detail::CheckedIndex {
+                auto v = detail::value_from_data<typename Source::Value>(logical);
+                if constexpr (std::is_invocable_v<F&, const RegAccessInfo&>)
+                    return detail::checked_access_result<typename Output::Value>(
+                        std::invoke(f, info));
+                else if constexpr (std::is_invocable_v<F&, std::uint32_t, decltype(v)>) {
+                    if (!info.resolved_identity)
+                        return {ErrorKind::Device, "no resolved identity"};
+                    return detail::checked_access_result<typename Output::Value>(
+                        std::invoke(f, *info.resolved_identity, v));
+                } else
+                    return detail::checked_access_result<typename Output::Value>(std::invoke(f, v));
             };
             return *this;
         }

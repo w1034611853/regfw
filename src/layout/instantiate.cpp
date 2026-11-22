@@ -1,14 +1,18 @@
 #include "internal/runtime_impl.hpp"
 namespace reg {
-void Groups::apply_index(const detail::StaticIndexRule& rule,
-                         const detail::AccessResolverSlot& slot,
-                         RegAccessInfo& info) {
+detail::AccessFailure Groups::apply_index(const detail::StaticIndexRule& rule,
+                                          const detail::AccessResolverSlot& slot,
+                                          RegAccessInfo& info) {
     const auto coordinate = info.request_index.dimension(rule.dimension);
     if (!coordinate)
-        throw RegAccessDeriveError::device_error("coordinate dimension missing");
-    info.index_fields.insert(rule.source, rule.source_name, *coordinate, rule.dimension);
-    const auto value = slot(info, *coordinate);
-    info.mapped_fields.insert(rule.output, rule.output_name, value, rule.dimension);
+        return {ErrorKind::Device, "coordinate dimension missing"};
+    if (auto error =
+            info.index_fields.insert(rule.source, rule.source_name, *coordinate, rule.dimension))
+        return error;
+    RegData value;
+    if (auto error = slot.resolve(info, *coordinate, value))
+        return error;
+    return info.mapped_fields.insert(rule.output, rule.output_name, value, rule.dimension);
 }
 void Groups::install_index(detail::EntityState* node, detail::StaticIndexRule rule) {
     if (!node || node->owner->is_finalized() || rule.rank != node->dims.size() ||
@@ -42,62 +46,59 @@ void Groups::install_index(detail::EntityState* node, detail::StaticIndexRule ru
             false});
     node->derivations.push_back({std::string(rule.name),
                                  [rule, slot](RegAccessInfo& info) {
-                                     apply_index(rule, *slot, info);
+                                     return apply_index(rule, *slot, info);
                                  },
                                  std::move(descriptions)});
 }
 void Groups::GroupBuilder::add_member(detail::EntityState* node) {
     plan_->members.push_back({node, node->owner->lifetime()});
 }
-void Groups::Plan::run(RegAccessInfo& info) const {
-    // The common one-coordinate named mapping has no field search
-    // or conversion work. It still invokes the live resolver slot
-    // and leaves range/conflict validation to the normal derive step.
-    if (coordinates.size() == 1 && derivations.size() == 1 && info.index_fields.size == 0 &&
-        info.mapped_fields.size == 0) {
-        const auto& c = coordinates[0];
-        const auto& d = *derivations[0];
-        if (c.identity && d.source == c.id && d.resolver_slot && !d.condition) {
-            auto v = info.request_index.dimension(c.dimension);
-            if (!v)
-                throw RegAccessDeriveError::device_error("coordinate dimension missing");
-            info.index_fields.entries.activate();
-            info.mapped_fields.entries.activate();
-            info.index_fields.entries[0] = {c.id, c.name, *v, c.dimension};
-            info.index_fields.size = 1;
-            const auto value = (*d.resolver_slot)(info, *v);
-            info.mapped_fields.entries[0] = {d.output,
-                                             d.output_name,
-                                             value,
-                                             d.metadata_only ? std::nullopt
-                                                             : std::optional(c.dimension)};
-            info.mapped_fields.size = 1;
-            return;
-        }
-    }
+detail::AccessFailure Groups::Plan::run(RegAccessInfo& info) const {
     for (const auto& c : coordinates) {
         auto v = info.request_index.dimension(c.dimension);
         if (!v)
-            throw RegAccessDeriveError::device_error("coordinate dimension missing");
-        info.index_fields.insert(c.id, c.name, c.identity ? *v : c.convert(*v), c.dimension);
+            return {ErrorKind::Device, "coordinate dimension missing"};
+        RegData value = *v;
+        if (!c.identity)
+            if (auto error = detail::invoke_access_user([&] {
+                    value = c.convert(*v);
+                }))
+                return error;
+        if (auto error = info.index_fields.insert(c.id, c.name, value, c.dimension))
+            return error;
     }
     for (const auto& p : derivations) {
         const auto& d = *p;
         const auto* source = info.index_fields.get(d.source);
         if (!source || !source->dimension)
-            throw RegAccessDeriveError::device_error("missing derivation source coordinate");
+            return {ErrorKind::Device, "missing derivation source coordinate"};
+        bool enabled = true;
+        if (d.condition)
+            if (auto error = detail::invoke_access_user([&] {
+                    enabled = d.condition(info);
+                }))
+                return error;
         RegData value;
-        if (!d.condition || d.condition(info))
-            value = d.resolver_slot ? (*d.resolver_slot)(info, source->value) : d.resolver(info);
-        else {
+        if (enabled) {
+            auto error = d.resolver_slot ? d.resolver_slot->resolve(info, source->value, value)
+                                         : detail::invoke_index_resolver(
+                                               [&] {
+                                                   return d.resolver(info, source->value);
+                                               },
+                                               value);
+            if (error)
+                return error;
+        } else {
             auto f = info.index_fields.get(d.fallback);
             if (!f)
-                throw RegAccessDeriveError::device_error("missing derivation fallback coordinate");
+                return {ErrorKind::Device, "missing derivation fallback coordinate"};
             value = f->value;
         }
-        info.mapped_fields.insert(
-            d.output, d.output_name, value, d.metadata_only ? std::nullopt : source->dimension);
+        if (auto error = info.mapped_fields.insert(
+                d.output, d.output_name, value, d.metadata_only ? std::nullopt : source->dimension))
+            return error;
     }
+    return {};
 }
 void Groups::install() {
     // Validate all plans before attaching the first callback.
@@ -183,7 +184,7 @@ void Groups::install() {
             }
             node.derivations.push_back({p->name,
                                         [p](RegAccessInfo& i) {
-                                            p->run(i);
+                                            return p->run(i);
                                         },
                                         descriptions});
         }

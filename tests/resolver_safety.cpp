@@ -122,15 +122,17 @@ void identity_failure() {
     second.on_write([&] {
         ++events;
     });
-    map.set_identity_resolver(IdentityRoute, [&](const auto& request) {
+    map.set_identity_resolver(IdentityRoute, [&](const auto& request) -> int {
         ++calls;
         if (mode == 1)
             throw std::runtime_error("route table broken");
         if (mode == 2)
-            return 2u;
+            return 2;
         if (mode == 3)
             throw reg::Error("identity denied", reg::ErrorKind::Identity);
-        return request.request_id;
+        if (mode == 4)
+            return -1;
+        return static_cast<int>(request.request_id);
     });
     map.finalize();
     CHECK(calls == 0);
@@ -152,6 +154,8 @@ void identity_failure() {
     CHECK(ignored.result == reg::RegMemTxResult::Ignored && ignored.value == 0xdeadbeef);
     CHECK(map.mmio_write(0, 33).result == reg::RegMemTxResult::Ignored);
     mode = 3;
+    CHECK(map.mmio_write(0, 33).result == reg::RegMemTxResult::Ignored);
+    mode = 4;
     CHECK(map.mmio_write(0, 33).result == reg::RegMemTxResult::Ignored);
     mode = 1;
     CHECK(map.mmio_write(0, 33).result == reg::RegMemTxResult::DeviceError);

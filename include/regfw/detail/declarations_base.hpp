@@ -62,7 +62,7 @@ class IndexMapping {
     const void* output_{};
     std::string_view output_name_;
     std::function<bool(const RegAccessInfo&)> condition_;
-    std::function<RegData(const RegAccessInfo&)> resolver_;
+    std::function<detail::CheckedIndex(const RegAccessInfo&, RegData)> resolver_;
     const void* resolver_key_{};
     std::string_view resolver_name_;
     const void* fallback_{};
@@ -76,10 +76,9 @@ class IndexMapping {
 template <class Source, class Output>
 class IndexMappingBuilder {
     IndexMapping rule_;
-    Source source_;
 
   public:
-    IndexMappingBuilder(Source source, Output output) : source_(source) {
+    IndexMappingBuilder(Source source, Output output) {
         rule_.source_ = source.id();
         rule_.output_ = output.id();
         rule_.output_name_ = output.name;
@@ -116,17 +115,18 @@ class IndexMappingBuilder {
         rule_.resolver_key_ = nullptr;
         rule_.resolver_name_ = {};
         rule_.resolver_description_ = detail::callback_description<F>(name, at);
-        rule_.resolver_ = [f = std::move(f), source = source_](const RegAccessInfo& info) mutable {
-            const auto value = info.index_as(source);
-            auto call = [&] {
-                if constexpr (std::is_invocable_v<F&, const RegAccessInfo&>)
-                    return std::invoke(f, info);
-                else if constexpr (std::is_invocable_v<F&, std::uint32_t, decltype(value)>)
-                    return std::invoke(f, info.resolved_id(), value);
-                else
-                    return std::invoke(f, value);
-            };
-            return detail::checked_access_result<typename Output::Value>(call());
+        rule_.resolver_ = [f = std::move(f)](const RegAccessInfo& info,
+                                             RegData logical) mutable -> detail::CheckedIndex {
+            auto v = detail::value_from_data<typename Source::Value>(logical);
+            if constexpr (std::is_invocable_v<F&, const RegAccessInfo&>)
+                return detail::checked_access_result<typename Output::Value>(std::invoke(f, info));
+            else if constexpr (std::is_invocable_v<F&, std::uint32_t, decltype(v)>) {
+                if (!info.resolved_identity)
+                    return {ErrorKind::Device, "no resolved identity"};
+                return detail::checked_access_result<typename Output::Value>(
+                    std::invoke(f, *info.resolved_identity, v));
+            } else
+                return detail::checked_access_result<typename Output::Value>(std::invoke(f, v));
         };
         return *this;
     }

@@ -26,6 +26,19 @@ python3 benchmarks/measure_layout_study.py --base /tmp/study-before \
 共享表统计、`mallinfo2` 分配量及进程峰值 RSS 分别报告。历史 `entityhash_memory.cpp`
 是独立容器实验，不能作为框架实际内存变化的唯一依据。
 
+同步架构精简增加了错误请求基准。用 `build_layout_study.py --names errors` 构建
+两个版本的 `mmio_errors.cpp`，再对配套二进制运行：
+
+```sh
+python3 benchmarks/measure_layout_study.py --base /tmp/study-before \
+  --candidate /tmp/study-after --out /tmp/error-results \
+  --blocks 5 --iterations 400000 --cpu 1 --groups errors
+```
+
+四种探针覆盖已配置 View 的空洞、映射地址空间之外、自然对齐失败和非法访问宽度。
+读写分别测量，并核对返回状态、无效读值和寄存器状态。配对方法见
+[同步架构精简报告](../docs/Performance-Architecture-Sync.md)。
+
 ## pre_access / 地址分发对照
 
 本文钩子优化报告以无异步的 `cec42e1f3a25bd8804129ff4c349a0dd54128742`（0.37.0）及回移同一优化的版本配对；PR 集成 main 0.38.0。复现时不要混用这两套版本。

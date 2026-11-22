@@ -157,7 +157,8 @@ std::string RegisterMap::explain_address(std::uint64_t address,
         validation.info.kind = kind;
         validation.info.size = static_cast<std::uint8_t>(size);
         validation.info.internal_byte_offset = static_cast<std::uint8_t>(offset);
-        validate_access(validation);
+        if (auto error = validate_access(validation))
+            throw Error(error.message, error.kind, error.location);
         if (size == 8 && alias.target % 8)
             throw Error("invalid 64-bit access pair", ErrorKind::Unsupported);
         const auto read_policy = n.transaction_policy.read;
