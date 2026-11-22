@@ -367,30 +367,33 @@ const std::vector<ElementRecord>& static_sparse_order() {
         std::vector<ElementRecord> out;
         if constexpr (!Shape::monotone) {
             if (Shape::count > 16384)
-                throw "formula layout: UnsupportedGeometry (non-monotone register shape needs a "
-                      "per-element record table larger than 16384)";
+                throw Error("formula layout: UnsupportedGeometry (non-monotone register shape "
+                            "needs a per-element record table larger than 16384)",
+                            ErrorKind::Configuration,
+                            Shape::spec.location);
             out.reserve(Shape::count);
-            std::array<std::uint64_t, MAX_REG_DIMS> multiplier{};
-            std::uint64_t product = 1;
-            for (std::size_t d = Shape::spec.rank; d-- > 0;) {
-                multiplier[d] = product;
-                product *= Shape::spec.dimensions[d];
-            }
             for (std::uint32_t k = 0; k < Shape::count; ++k) {
-                std::uint64_t rest = k, offset = 0, linear = 0;
-                for (std::size_t d = 0; d < Shape::spec.rank; ++d) {
+                std::uint64_t rest = k, offset = 0;
+                for (std::size_t d = Shape::spec.rank; d-- > 0;) {
                     const auto i = rest % Shape::spec.dimensions[d];
                     rest /= Shape::spec.dimensions[d];
                     if (i && Shape::spec.stride_bytes[d] > (UINT64_MAX - offset) / i)
                         throw "formula layout: ArithmeticOverflow (register element address)";
                     offset += i * Shape::spec.stride_bytes[d];
-                    linear += i * multiplier[d];
                 }
-                out.push_back({offset, static_cast<std::uint32_t>(linear)});
+                if (offset > UINT64_MAX - Shape::occupied)
+                    throw "formula layout: ArithmeticOverflow (register element end)";
+                out.push_back({offset, k});
             }
             std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
                 return a.offset < b.offset || (a.offset == b.offset && a.linear < b.linear);
             });
+            for (std::size_t k = 1; k < out.size(); ++k)
+                if (out[k].offset - out[k - 1].offset < Shape::occupied)
+                    throw Error("formula layout: SelfOverlap (one declaration maps elements onto "
+                                "the same bytes)",
+                                ErrorKind::Configuration,
+                                Shape::spec.location);
         }
         return out;
     }();
@@ -805,69 +808,26 @@ void formula_run(Fill&& fill) {
         for (std::size_t d = 0; d < rank; ++d) {
             spec.strides_asc[d] = plan.steps[d];
             spec.extents_asc[d] = plan.digits[d];
-            spec.axis_asc[d] = plan.axes_map[d];
             spec.multiplier[d] = plan.linear_mult[d];
             const auto axis = plan.axes_map[d];
             spec.strides_decl[axis] = plan.steps[d];
             spec.extents_decl[axis] = plan.digits[d];
-            spec.multiplier_decl[axis] = plan.linear_mult[d];
         }
-        // Choose the cheapest exact inverse for this shape. A rank-0 shape is
-        // one element; a contiguous rank-1 shape is a division; a monotone
-        // lattice is successive division from the largest stride. An
-        // interleaved lattice is a gcd reduction plus a modular inverse on
-        // the two smallest-stride axes, with every larger axis decoded as a
-        // super-increasing ladder above them — so interleaved declarations of
-        // any rank are arithmetic whenever each non-pair axis dominates the
-        // full span below it. Only shapes where no such split exists need the
-        // shared element records.
-        bool classified = false;
         if (plan.count == 1) {
             spec.kind = FormulaDecodeKind::Scalar;
             spec.span = plan.occupied;
-            classified = true;
         } else if (spec.dense) {
             spec.kind = FormulaDecodeKind::Dense;
             spec.span = std::uint64_t(plan.count) * plan.occupied;
-            classified = true;
         } else if (plan.monotone) {
-            std::uint64_t span = plan.occupied;
-            for (std::size_t d = 0; d < rank; ++d)
-                span += std::uint64_t(plan.digits[d] - 1) * plan.steps[d];
             spec.kind = FormulaDecodeKind::Monotone;
-            spec.span = span;
-            classified = true;
-        } else
-            switch (classify_interleaved(spec)) {
-                case FormulaClassifyResult::Arithmetic:
-                    classified = true;
-                    break;
-                case FormulaClassifyResult::SelfOverlap:
-                    throw "formula layout: SelfOverlap (one declaration maps elements onto the "
-                          "same bytes)";
-                case FormulaClassifyResult::BadInverse:
-                    throw "formula layout: InterleavedDecode (no modular inverse for the declared "
-                          "strides)";
-                case FormulaClassifyResult::NeedsTable:
-                    break;
-            }
-        if (!classified) {
-            // No arithmetic split exists: keep the shared offset-sorted
-            // records. They are per declaration shape, never per word. Refuse
-            // shapes whose record table would grow unboundedly: silently
-            // falling back to the word builder is the failure mode this
-            // backend exists to remove.
-            if (plan.sparse_order.size() > 16384)
-                throw "formula layout: UnsupportedGeometry (non-monotone register shape needs a "
-                      "per-element record table larger than 16384)";
-            for (std::size_t k = 1; k < plan.sparse_order.size(); ++k)
-                if (plan.sparse_order[k].offset == plan.sparse_order[k - 1].offset)
-                    throw "formula layout: SelfOverlap (one declaration maps elements onto the "
-                          "same bytes)";
+            spec.span = plan.occupied;
+            for (std::size_t d = 0; d < rank; ++d)
+                spec.span += std::uint64_t(plan.digits[d] - 1) * plan.steps[d];
+        } else {
             spec.kind = FormulaDecodeKind::Table;
             spec.sparse = plan.sparse_order;
-            spec.span = plan.sparse_order.empty() ? std::uint64_t(plan.occupied)
-                                                  : plan.sparse_order.back().offset + plan.occupied;
+            spec.span = spec.sparse.back().offset + plan.occupied;
         }
         std::uint32_t index = 0;
         for (; index < arrays.size(); ++index) {
@@ -876,7 +836,8 @@ void formula_run(Fill&& fill) {
                 other.monotone == spec.monotone && other.rank == spec.rank &&
                 other.kind == spec.kind && other.dense == spec.dense &&
                 other.strides_asc == spec.strides_asc && other.extents_asc == spec.extents_asc &&
-                other.axis_asc == spec.axis_asc && other.multiplier == spec.multiplier &&
+                other.strides_decl == spec.strides_decl &&
+                other.extents_decl == spec.extents_decl &&
                 other.sparse.size() == spec.sparse.size())
                 break;
         }

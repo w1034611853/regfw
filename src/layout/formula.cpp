@@ -76,28 +76,6 @@ void collect_intervals(const FormulaArraySpec& array,
                 out.push_back({records[k].offset, records[k].linear, occupied});
             return;
         }
-        case FormulaDecodeKind::Interleaved2: {
-            if (array.rank > 2)
-                break; // generalized ladders stream via floor/next below
-            const auto d0 = array.inter_axes[0], d1 = array.inter_axes[1];
-            for (std::uint32_t i = 0; i < array.extents_decl[d0]; ++i) {
-                const auto base = std::uint64_t(i) * array.strides_decl[d0];
-                if (base >= high)
-                    break;
-                for (std::uint32_t j = 0; j < array.extents_decl[d1]; ++j) {
-                    const auto start = base + std::uint64_t(j) * array.strides_decl[d1];
-                    if (start < high && start + occupied > low)
-                        out.push_back({start,
-                                       static_cast<std::uint32_t>(i * array.multiplier_decl[d0] +
-                                                                  j * array.multiplier_decl[d1]),
-                                       occupied});
-                }
-            }
-            std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
-                return a.start < b.start;
-            });
-            return;
-        }
         case FormulaDecodeKind::Monotone:
             break;
     }

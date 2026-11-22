@@ -508,10 +508,8 @@ class ViewCompiler {
                     spec.dense = stride == occupied;
                     spec.strides_decl[0] = stride;
                     spec.extents_decl[0] = count;
-                    spec.multiplier_decl[0] = 1;
                     spec.strides_asc[0] = stride;
                     spec.extents_asc[0] = count;
-                    spec.axis_asc[0] = 0;
                     spec.multiplier[0] = 1;
                     if (spec.dense) {
                         spec.kind = FormulaDecodeKind::Dense;
@@ -563,50 +561,37 @@ class ViewCompiler {
                             // Declaration-order linear index: digit d
                             // contributes its coordinate times the product of
                             // the inner (higher-index) declaration extents.
+                            std::array<std::uint64_t, MAX_REG_DIMS> multiplier{};
                             std::uint64_t carry = 1;
                             for (std::size_t d = rank; d-- > 0;) {
-                                spec.multiplier_decl[d] = carry;
+                                multiplier[d] = carry;
                                 carry *= node->dims[d];
                             }
+                            std::uint64_t span = occupied;
                             spec.monotone = true;
-                            for (std::size_t d = 1; d < rank; ++d)
-                                if (strides[order[d]] <
-                                    strides[order[d - 1]] * node->dims[order[d - 1]])
+                            for (std::size_t d = 0; d < rank; ++d) {
+                                const auto axis = order[d];
+                                if (node->dims[axis] == 1)
+                                    continue;
+                                if (strides[axis] < span) {
                                     spec.monotone = false;
+                                    break;
+                                }
+                                span += std::uint64_t(node->dims[axis] - 1) * strides[axis];
+                            }
                             for (std::size_t d = 0; d < rank; ++d) {
                                 const auto axis = order[d];
                                 spec.strides_asc[d] = strides[axis];
                                 spec.extents_asc[d] = static_cast<std::uint32_t>(node->dims[axis]);
-                                spec.axis_asc[d] = static_cast<std::uint32_t>(axis);
-                                spec.multiplier[d] = spec.multiplier_decl[axis];
+                                spec.multiplier[d] = multiplier[axis];
                                 spec.strides_decl[axis] = strides[axis];
                                 spec.extents_decl[axis] =
                                     static_cast<std::uint32_t>(node->dims[axis]);
                             }
                             if (spec.monotone) {
                                 spec.kind = FormulaDecodeKind::Monotone;
-                                std::uint64_t span = occupied;
-                                for (std::size_t d = 0; d < rank; ++d)
-                                    span += std::uint64_t(node->dims[d] - 1) * strides[d];
                                 spec.span = span;
                                 decodable = true;
-                            } else {
-                                // Reuse the compiled-static classifier to keep
-                                // stride feasibility and collision rules identical.
-                                switch (classify_interleaved(spec)) {
-                                    case FormulaClassifyResult::Arithmetic:
-                                        decodable = true;
-                                        break;
-                                    case FormulaClassifyResult::SelfOverlap:
-                                        fail("view maps one declaration onto the same bytes twice "
-                                             "(self-overlapping strides): " +
-                                             f.name);
-                                    case FormulaClassifyResult::BadInverse:
-                                        fail("view strides have no modular inverse for decoding: " +
-                                             f.name);
-                                    case FormulaClassifyResult::NeedsTable:
-                                        break;
-                                }
                             }
                         }
                     }
@@ -630,7 +615,7 @@ class ViewCompiler {
                     return a.offset < b.offset;
                 });
                 for (std::size_t m = 1; m < records.size(); ++m)
-                    if (records[m].offset == records[m - 1].offset)
+                    if (records[m].offset - records[m - 1].offset < occupied)
                         fail("view maps one declaration onto the same bytes twice: " + f.name);
                 spec = FormulaArraySpec{};
                 spec.kind = FormulaDecodeKind::Table;

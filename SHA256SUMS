@@ -64,6 +64,7 @@ f9dc65f0259039099894b920f68234fb7e23f24a9d1abf2c8fec352c317d5c3e  ./docs/Archite
 210a551373d7d5067264301ad30589ad77673ec6a983ffcc2b1b41047c3cc7ff  ./docs/LayoutCompilation.md
 1834f6cd58f30371e88d08b3273e3d86e1109e109800ad970360ba2999fbd693  ./docs/LegacyStaticLayout.md
 1010f7d6062364eb5b6f1017ab7bfc565456a82ff5f4882ff7c915b2db719765  ./docs/Migration.md
+7ecedcf680a988d3abaf7802e15c99ded11ab51a4f79a9c8038f112a9bcaec28  ./docs/Performance-Architecture-Sync.md
 e02c23d598521cf7fdd3a5f97c19c84167bfc952adbb8484ac3262f7d6830d9b  ./docs/Performance-Compact-Dispatch.md
 5a42421d130073c609ef82bcc030a86ee515c6a1c3c89b0a233ff5767e874540  ./docs/Performance-Dispatch.md
 51ab53103f55129b50cb9dd14a90e70ecea34b9d7ce3b50b40dc127c053d2f06  ./docs/Performance-Fixed-Lifetime.md
@@ -102,7 +103,7 @@ b0e0c01c214e2ab956bc9098ecf0f374fc53870636b56fbfb35de1a04fcb519c  ./include/regf
 aa2c7788dc9b3a058869613739e0a261045df9df4cc7050bc69aa3aa6f865bc2  ./include/regfw/bundle.hpp
 831977703e37efef14f68775c423ff5d9112d80c75d308683ecd3f5eaf354f49  ./include/regfw/declarations.hpp
 7ced02a5deb4eb6c4af0c03311c40d938cd3be289a81936a8a0bc5883305486a  ./include/regfw/detail/declarations_base.hpp
-55997e15781e2e1d775f4a8b4ee6d854245843c7b627438bff1be3e275bc9d09  ./include/regfw/detail/formula_plan.hpp
+77ff27ef13109a937af4b1f88c8fee69382f3e5eaa44cc799d0eef7963acef58  ./include/regfw/detail/formula_plan.hpp
 93d883c3b9cf5c350b42ad7bd5020a421e894fa31980f2fc8e9d9bea56fe6532  ./include/regfw/detail/static_metadata.hpp
 fe92ef9ab55c6058e927def5996bc715583cc31ef2e28d05ba0a8c1058b68d48  ./include/regfw/detail/static_plan.hpp
 ce293fec380111f9b9b8705458734a77a101d2dde89cc853c0937c05a2113463  ./include/regfw/detail/view_description.hpp
@@ -114,7 +115,7 @@ e9e44ea898555b84ee78fae851865a7c6842606043365fa93792c58afc272ddf  ./include/regf
 a80044b973ffe877e1d40dc80a6cb3be9e336ee7882db90e13f8c98c9a1055d3  ./include/regfw/qemu_bridge.h
 ffe136a31e661ab38dbf45e4d363f271935d6450190220f605f93f8eb1dc0f78  ./include/regfw/regfw.hpp
 39e280d40c622d3bd4544f48858ec8b6268a8e22d381c4541710c31fa0d2bd61  ./include/regfw/runtime.hpp
-6f28ee6c4037da2372739be202a56748b6a904c4a6671e4fd6f14e44788109ac  ./include/regfw/static_layout.hpp
+8188c47a3592f0e814648310ec68ebd6abe4e0f42f0e9dda137131ab2f6f317c  ./include/regfw/static_layout.hpp
 a009ba26e566e58a36b285e6bbfc391e04edc7482d24dbbce9968f00f27caa56  ./include/regfw/storage.hpp
 ce8d092c0de4e1902a72bdccb6d3e147a6581871d6cc860dcf449f6646e24d97  ./include/regfw/types.hpp
 7ca43a0ae26997a7f56dcb07d1abad9c9f04e0e1207b22bb65212248a3f1185a  ./include/regfw/value.hpp
@@ -136,8 +137,8 @@ ef62df703036ca18062acc0759b92da3bb5246245857540fced7e88b3fffde72  ./src/internal
 17c4841d60600fef0ee7cac5a41ab927cbef522d67738df1bbe1dbf8bd21152c  ./src/internal/formula_decoder.hpp
 1e556d1618d6d76872633998db4a9f997a120045e35e086b2e4c04cf4e7ce941  ./src/internal/runtime_impl.hpp
 bec39e4aa80e51ee0738617e174ff7c8b4e1547ea46e1d90cb7d4429b49d27f8  ./src/internal/snapshot_context.hpp
-bd14d10563851d721deddde21333693d6479b1ad4058039bd16f0c977d129334  ./src/layout/address_view.cpp
-2c04b0ab84714b12c2f7c52e70a7dc9d68873af54b72f310f9d0933b971ef3bb  ./src/layout/formula.cpp
+3725da8839d76341a353968f9e572c8f3e1009370b645bdd20ac6f07ffc5ad6e  ./src/layout/address_view.cpp
+6bf1d4c8fbe2d073684dc01310c097507f6e45b548b4fe732ce3f4bb2a610351  ./src/layout/formula.cpp
 fe70fff42a690a7a9905788df292caf328dd1e696040d2d58ea07e40937c6d0e  ./src/layout/instantiate.cpp
 745925bbfc9832ed86caa3566803ff0d7dcb7d42733965df5765bd4dc7dcfd3f  ./src/runtime/access.cpp
 e11321bac2e0044e7d07665f785a6151fa0bede8876bc1a1f8f3ee7465ac94cd  ./src/runtime/behaviors.cpp
@@ -159,7 +160,7 @@ f1c9109f8b317506da45b43c91d00eb4507ed0cf0185a393b3cfd87904b59a33  ./tests/dispat
 51326e8c7ebd1509fa6a4cdf7c466d592af5b6ac03610123215c79f7f0662035  ./tests/entity_view.cpp
 57ec24ec032f5d243fd6e2cb5557fd59f7be8891857b1f5c7e1f123b3595b5c5  ./tests/fast_path.cpp
 dcebfc71aa9fdb2a156a1fa4a9a6944b4017e5e6f0906c461cc13a7b1d630423  ./tests/formula_diff.cpp
-b5a1f8b2bd759db336ec3735d97e5257a246e607b279af216cb5b156400c9566  ./tests/formula_fastpaths.cpp
+ed19f14d4f411c35aa75778f1f1bff960a1ed0ecae46de39f613214d68152cdb  ./tests/formula_fastpaths.cpp
 f3937c6994f386608069689b7c62342267b5dfe7aff01f51548df2410f2ea6f8  ./tests/formula_geometry.cpp
 0bee95c2a5ab50818ba3c3aff613402a6c54f80c533fa7e1a2b6d5cddce7548f  ./tests/formula_golden.cpp
 e354ca6b92cf9fd296bd782c3e83557fac13e1137c762288ca5f16c18874e6ac  ./tests/formula_regressions.cpp

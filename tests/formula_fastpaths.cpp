@@ -4,8 +4,8 @@
 //  - repeated hole accesses must remain unmapped without stale decode state
 //  - scope comparison must index each chain from its own end (the 0.35.0
 //    release indexed one chain with the other's length)
-//  - dynamic declaration-pattern mounts: dense, strided, interleaved (rank 2
-//    and rank 3 with a super-increasing ladder), non-power-of-two strides
+//  - dynamic declaration-pattern mounts: dense, strided, interleaved tables
+//    (rank 2 and rank 3), non-power-of-two strides
 //    and 64-bit wide arrays
 //  - the same shapes through the compiled-static path
 #include <regfw/regfw.hpp>
@@ -41,13 +41,27 @@ struct DynLayout : reg::Bundle {
 struct StaticLayout : reg::Bundle {
     REG_BUNDLE(StaticLayout);
     REG_ENTITY(shapes, Shapes);
-    REG_LAYOUT([](auto layout) {
+    static constexpr auto factory = [] {
         namespace reg = ::reg::compiled;
-        (void)layout;
         return reg::address_space("STA").map(
             reg::view("V", 0x3000).map(reg::target<&StaticLayout::shapes>()), 0);
-    });
+    };
+    REG_STATIC_LAYOUT(factory);
 };
+
+void table_kinds() {
+    const auto plan =
+        reg::detail::build_formula_layout_runtime<StaticLayout, StaticLayout::factory>();
+    for (const auto base : {0x200u, 0x1000u}) {
+        auto mount = std::find_if(plan.mounts.begin(), plan.mounts.end(), [&](const auto& m) {
+            return m.base == base;
+        });
+        CHECK(mount != plan.mounts.end());
+        const auto& array = plan.arrays[mount->array];
+        CHECK(array.kind == reg::detail::FormulaDecodeKind::Table);
+        CHECK(array.sparse.size() == array.count);
+    }
+}
 
 template <class L>
 void exercise_geometry() {
@@ -362,6 +376,7 @@ void routed_tables() {
 } // namespace
 int main() try {
     exercise_geometry<DynLayout>();
+    table_kinds();
     exercise_geometry<StaticLayout>();
     memo_dynamic_state();
     scope_depth_priority();
@@ -371,7 +386,7 @@ int main() try {
     routed_tables<true>();
     std::cout
         << "PASS: fast-path caches under dynamic callbacks/borrow, unequal-depth scope priority, "
-           "dynamic+static patterns (dense/strided/interleaved2/ladder/holes/wide)\n";
+           "dynamic+static patterns (dense/strided/interleaved tables/holes/wide)\n";
 } catch (const std::exception& e) {
     std::cerr << "FAIL: " << e.what() << '\n';
     return 1;
