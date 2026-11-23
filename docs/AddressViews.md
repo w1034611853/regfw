@@ -176,7 +176,8 @@ return reg::address_space("POE_CPU")
 
 旧 Window DSL 已删除。新 AddressSpace 根要求存储通过 REG_ENTITY/REG_REPEAT_ENTITY 创建；不能混用旧式有地址存储或在构建后追加旧窗口。一个布局路径仍只有一份 VF identity；HAC 等额外逻辑字段可在设备入口/访问组中处理，本版没有隐式引入多层身份转换。
 
-快照格式仍为 v2：只保存实体与活跃事务，不保存 View 描述/分发表；加载前先重建同一设备布局并绑定回调。使用新旧两种布局，只要实体快照 schema 兼容，就不因增加地址别名而复制状态。完整约束见 [Snapshot](Snapshot.md)。
+无参 `bank.save()` 返回内存 V2 快照，QEMU 模块流使用紧凑格式。两个入口均按实体保存值和活动事务，
+多个地址入口共享一份状态。恢复前先重建设备布局并绑定回调。完整约束见[快照](Snapshot.md)。
 
 ## 完整 PF/VF 布局声明
 
@@ -270,7 +271,7 @@ return reg::address_space("DEVICE")
 
 布局表中的地址映射行统一显示 `VIEW`；映射实体时显示 `VIEW → entity: <原始实体组或 REG 名称>`，`reset` 表示目标存储的复位归属。PF、PF_VF、VF 的多个入口会显示同一个共享实体目标名，不再把每个入口标成新 ENTITY。折叠重复族的目标名/复位信息取 i=j=k=0 代表实例；实体范围列是映射边界，不表示整段地址都有实体寄存器。
 
-## 按 AddressView 绑定 pre_access（0.24.0）
+## 按 AddressView 绑定 pre_access
 
 优先使用命名键，布局只声明挂载范围，在 bank 初始化后绑定设备函数：
 
@@ -296,12 +297,12 @@ reg_bank.map().set_pre_access(CheckBusiness,
 
 每次有效 MMIO beat 都调用，包括宽 REG 的暂存写和快照续读。RO 忽略写、入口权限拒绝、未映射/保留地址及 resolver 失败不会运行钩子。内部 ref()/data 更新、reset、save/load、describe_layout、explain_address 不运行钩子。
 
-命名键未绑定时 finish 报 Configuration；有意延迟绑定可 map.defer_pre_access(key)。之后可 set/clear/has_pre_access(key)；clear 只清该键，不影响全局钩子或其他键。已声明但未绑定的 View 钩子在访问时按钩子失败处理，不会静默放行；需要禁用时显式绑定空函数。重绑/clear 与 MMIO 由设备同步，不新增线程安全。
+在 `finish()` 前用 `set_pre_access(key, fn)` 绑定命名键。初始化期间可用
+`clear_pre_access(key)` 和 `has_pre_access(key)` 管理该键。 `finish()` 检查必需的绑定；
+未绑定或在 `finish()` 后修改绑定都会得到 Configuration 错误。
 
 异常沿用原有 pre_access 行为：打印并停止后续钩子、behavior 和寄存器回调；写返回 Ignored，读返回 0（状态可能为 Ok），不回退其他映射。不要用此异常机制要求明确的总线 AccessError；此类需求仍在解析/验证阶段处理。钩子是 void，不使用返回 false 表达拒绝。
 
 钩子列表在构建时预编译，无钩子的记录为空指针；MMIO 不按 View 数量扫描。函数、捕获对象和钩子链不保存到 bank 快照；恢复前按设备初始化流程重建布局并绑定，外部业务状态由父对象保存。
 
-View pre_access 的测量方法、完整数据和适用边界见 [性能验证](Performance.md)。完整可运行命名钩子示例见 [view_pre_access.cpp](snippets/view_pre_access.cpp)。
-
-0.24.1 优化了钩子调用：普通 MMIO 调用不复制函数的 shared_ptr；仅当回调在 pre_access 链执行期间重绑/清除时，保留旧函数至本次 pre_access 链结束。回调内自修改仍受支持，后续钩子读取最新绑定；旧捕获对象的析构时点可能延后到本次 pre_access 链结束。框架仍不支持未同步的并发重绑。
+View pre_access 的测量方法、完整数据和适用边界见 [钩子性能分析](Performance-Hooks.md)。完整可运行命名钩子示例见 [view_pre_access.cpp](snippets/view_pre_access.cpp)。

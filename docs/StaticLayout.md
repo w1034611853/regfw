@@ -1,10 +1,6 @@
-> **0.36.0 更新：** 本文早期关于 `consteval`、静态索引或编译期几何验证的描述仅供历史参考。当前保留原有 REG_LAYOUT DSL，布局由普通 C++ 在首次使用时构建共享 Formula 描述及 EntityLayout Hash，几何错误在安装阶段报告。请以 [FormulaBackend.md](FormulaBackend.md) 与 [LayoutCompilation.md](LayoutCompilation.md) 为准。
+# 固定布局与符号前端
 
-> 0.33.3：前端 API 保持；规则布局直接填最终表、声明形状跨挂载共享，见 [LayoutCompilation](LayoutCompilation.md)。当前测量见 [Performance](Performance.md)。
-
-# 编译期布局：自动成员描述与符号对象（0.33.3）
-
-推荐 `REG_LAYOUT([](auto layout) { ... })`。REG / REG_ENTITY / REG_REPEAT_ENTITY 自动提供成员描述，不再要求 REG_SCHEMA。`layout` 是常量求值中的符号对象，没有运行期设备指针；`.map(layout.vf[i])` 选择已有实体，不分配存储。实际成员和回调仍通过 bank->vf[i] 访问。
+推荐 `REG_LAYOUT([](auto layout) { ... })`。REG / REG_ENTITY / REG_REPEAT_ENTITY 自动提供成员描述，不再要求 REG_SCHEMA。`layout` 是工厂使用的符号对象，不包含设备实例指针；`.map(layout.vf[i])` 选择已有实体，不分配存储。实际成员和回调仍通过 bank->vf[i] 访问。
 
 ```cpp
 REG_LAYOUT([](auto layout) {
@@ -43,21 +39,13 @@ REG_LAYOUT([](auto layout) {
 
 ## 编译期与运行期边界
 
-编译期仍执行 0.27 的布局编译器：范围/冲突验证、覆盖选择、路径权限、VF 身份族、固定流程、目标索引及只读分发表。本版不是运行期缓存，也没有给每次 MMIO 增加符号对象调用；符号对象只用于常量求值。
+带符号参数的布局工厂必须无捕获。声明类型的形状等常量由编译器生成；工厂首次使用时
+运行一次，几何检查、排序及地址表安装在初始化阶段完成。按设备实例选择布局或映射单个
+REG / 切片时，可使用动态 `REG_LAYOUT([&] {...})`。resolver 与回调在 `finish()` 前注册。
 
-实体值、事务状态、实际指针、回调捕获对象、诊断字符串仍在初始化时绑定。动态 VF/index resolver 每次访问照常执行，换绑/清除、pre_access 和日志继续生效。事务与快照格式仍为 v2；多个 bank 的值和回调不共享。
+静态组合的返回类型随子节点变化，采用链式 `map` / `map_repeat`。符号 `view` /
+`address_space` 与实体成员重名时，使用 `namespace reg = ::reg::compiled;`。
 
-静态工厂必须无捕获并可常量求值，局部辅助 lambda 可以捕获该工厂内仍有效的符号对象/局部 view。数量和基址必须可常量求值；读取本次设备配置、REG_DYNAMIC、单 REG/切片映射、内联 View 捕获钩子仍使用原动态 REG_LAYOUT。条件、多字段等 REG_ACCESS_GROUP 可以继续挂在静态映射的实体上。
-
-静态组合返回类型随子节点增加而变化：优先链式 map / map_repeat，不能用 `auto v=layout.view(...); v=v.map(...)` 追加不同类型。旧动态 View 的循环赋回用法继续支持。符号对象的 `view`/`address_space` 方法若与实体成员同名，使用局部 `namespace reg=::reg::compiled;` 构造器。
-
-要求 C++20，验证编译器与结果见 [VALIDATION](../VALIDATION.md)。大型布局可增加 GCC 的常量求值预算：
-
-```cmake
-target_compile_options(poe_device PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-fconstexpr-ops-limit=268435456>)
-```
-
-自动成员元数据和符号对象会增加编译器工作量；不宣称编译时间不变。只读计划仍按实际占用 word 保存描述，双入口/大数组有代码段及只读数据成本；高地址之间的空洞不分配表。
-
-0.27 的显式接口、详细编译期边界见 [旧静态接口](LegacyStaticLayout.md)。当前性能与验证见 [Performance](Performance.md)。
+现有显式布局使用 `REG_STATIC_LAYOUT`、`reg::static_view` 和 `reg::target<&Root::member>()`。
+`REG_SCHEMA` 可显式列出成员；安装时检查列表完整性。新声明由 REG 宏自动收集成员。
+见[实现与验证](FormulaBackend.md)和[分离翻译单元示例](LayoutCompilation.md)。

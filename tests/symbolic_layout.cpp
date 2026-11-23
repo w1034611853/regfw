@@ -357,7 +357,7 @@ struct DenseRoot : reg::Bundle {
         reg::detail::install_formula_layout(map, this, plan.view());
     }
 };
-void dense_pages() {
+void strided_array_holes() {
     reg::RegisterBank<DenseRoot> b(reg::space());
     b.finish();
     CHECK(b.map().mmio_write(A + 16, 22).success() && b->regs.TABLE.at(2).ref() == 22 &&
@@ -421,10 +421,10 @@ int main() {
         macro_and_instances();
         manual_constructors();
         nested_groups();
-        dense_pages();
+        strided_array_holes();
         selected_nested();
         named_constructors();
-        std::cout << "PASS: automatic schema / symbolic frontend / consteval layout / dynamic "
+        std::cout << "PASS: automatic schema / symbolic / dynamic "
                      "differential, live hooks, overlays, aliases, wide snapshot, independent "
                      "instances\n";
     } catch (const std::exception& e) {

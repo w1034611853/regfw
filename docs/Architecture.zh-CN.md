@@ -1,6 +1,4 @@
-# regfw 0.37.0：源码架构与阅读顺序
-
-这份文档是面向维护者的**代码导航**，不是新 API。0.37.0 只整理实现职责和 C++ 排版：设备侧原有 `#include <regfw/...>`、REG DSL、MMIO 接口、钩子、权限、事务、快照格式全部保留。
+# regfw 0.38.0 同步版源码架构
 
 ## 从哪里开始读
 
@@ -12,7 +10,7 @@
 | 访问入口 / 控制流 | `src/runtime/access.cpp` | `try_mmio_{read,write}_sized`、权限、映射、事务和快速执行 |
 | 实体生命周期 | `src/runtime/lifecycle.cpp`、`src/runtime/bindings.cpp` | Entity Storage 初始化、注册、finalize、回调槽绑定 |
 | 寄存器行为 | `src/runtime/behaviors.cpp`、`include/regfw/behaviors.hpp` | 字段读写规则、掩码等 |
-| Callback / Handle | `src/runtime/callbacks.cpp`、`src/runtime/handles.cpp` | 回调持有与 Handle 生命周期、检查 |
+| Callback / Handle | `src/runtime/callbacks.cpp`、`src/runtime/handles.cpp` | 回调适配与借用句柄 |
 | Snapshot / Reset | `src/snapshot/snapshot.cpp`、`src/snapshot/state.cpp`、`include/regfw/vmstate.hpp` | 事务快照、恢复、状态枚举与 reset |
 | 日志与诊断 | `src/diagnostics/`、`include/regfw/diagnostics.hpp` | hlog、布局描述、诊断文本、错误链 |
 | 内部结构 | `src/internal/entity_state.hpp`、`access_context.hpp`、`formula_decoder.hpp` | 实例所有权、访问上下文、共享解码器 |
@@ -25,7 +23,7 @@
 QEMU MMIO(address, size, value)
        |
        v
-runtime/access.cpp  [read/write 总入口，DispatchGuard]
+runtime/access.cpp  [read/write 总入口]
        |
        v
 View range / priority  [View 可能交叠；空洞透明，Reserve 阻断]
@@ -52,14 +50,12 @@ Access Engine          [PreAccess / resolver / access group / 权限 / transacti
 
 1. DSL 描述 Entity、REG、View、Repeat、Identity 的静态规则。
 2. 原生 C++ 构建小型布局描述，并构建按局部有效地址索引的共享 Hash；对大型宽寄存器需要按实际可访问字节构建记录。
-3. Bank 初始化时绑定存储、Scope、动态 Resolver/PreAccess/Callback 引用并执行合法性检查。
-4. MMIO 访问只做地址选择和访问执行；Storage、Callback、Transaction、Snapshot 的既有规则保持不变。
-
-0.36.0 已把大型 `consteval` 计划生成转移到运行时。0.37.0 **不再改变建表算法**，也不提供新缓存层。
+3. Bank 初始化时安装布局并绑定存储和 Scope，设备随后注册 resolver、pre_access 和回调。
+4. `finish()` 校验必需依赖并冻结配置。MMIO 通过同一解码器选择目标，再执行访问。
 
 ## Snapshot 与运行时状态
 
-`src/snapshot/snapshot.cpp` 负责完整快照序列化 / 恢复；`src/snapshot/state.cpp` 负责 reset、原始值导入导出及需要保存的实体顺序。Snapshot 格式仍是 V2；Reset、事务中间态与回调有效性必须有回归测试保护。
+`src/snapshot/snapshot.cpp` 负责完整快照序列化 / 恢复；`src/snapshot/state.cpp` 负责 reset、原始值导入导出及需要保存的实体顺序。内存快照使用 V2，`src/snapshot/compact.cpp` 实现紧凑流。两者均保存活动事务。
 
 `<regfw/vmstate.hpp>` 仍是可选 QEMU 适配入口，不随内部目录移动。
 
@@ -82,4 +78,4 @@ ctest --test-dir build --output-on-failure
 cmake --install build --prefix /tmp/regfw-install
 ```
 
-完整的命令与本次结果以根目录 `VALIDATION.md` 和交付报告为准。
+构建验证和性能对照见[同步架构精简](Performance-Architecture-Sync.md)。

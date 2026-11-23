@@ -94,4 +94,4 @@ std::cout << map.explain_address(address, 4, reg::RegTransactionKind::Read, 6);
 
 布局表中的地址映射行统一显示 `VIEW`；映射实体时显示 `VIEW → entity: <原始实体组或 REG 名称>`，`reset` 表示目标存储的复位归属。PF、PF_VF、VF 的多个入口会显示同一个共享实体目标名，不再把每个入口标成新 ENTITY。折叠重复族的目标名/复位信息取 i=j=k=0 代表实例；实体范围列是映射边界，不表示整段地址都有实体寄存器。
 
-0.24.0 Full 增加 VIEW PRE_ACCESS BINDINGS；explain_address 静态列出选中路径的钩子键及绑定状态，不执行钩子。Summary 的 View 行显示 pre_access 键名。全局与 View 钩子异常语义相同，日志含失败 View/键名；异常停止后续阶段但不保证返回总线故障。
+Full 报告包含 VIEW PRE_ACCESS BINDINGS。explain_address 静态列出选中路径的钩子键及绑定状态，不执行钩子。Summary 的 View 行显示 pre_access 键名。全局与 View 钩子异常语义相同，日志含失败 View/键名；异常停止后续阶段但不保证返回总线故障。

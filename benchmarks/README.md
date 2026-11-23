@@ -1,6 +1,6 @@
 # regfw 性能复测入口
 
-## 紧凑分发数据与初始化（sync）
+## 配对测量
 
 [本轮实现与测量](../docs/Performance-Compact-Dispatch.md) 使用真实 RegisterBank 的
 `dispatch_layout.cpp`，覆盖多个 View、无关/局部 Reserve、普通/高位稀疏地址及九份实体的
@@ -21,10 +21,9 @@ python3 benchmarks/measure_layout_study.py --base /tmp/study-before \
 ```
 
 构建脚本需要两个匹配版本的 Git 检出及恢复后的 hlog；输出目录须尚不存在。
-`--groups` 可选择 scalar、mapped、dispatch、memory、init、handles；`--cases` 用于
+`--groups` 可选择 scalar、mapped、dispatch、memory、init、handles、errors；`--cases` 用于
 单项复测。输出保存版本、库与二进制摘要、逐次数据及数值校验。
-共享表统计、`mallinfo2` 分配量及进程峰值 RSS 分别报告。历史 `entityhash_memory.cpp`
-是独立容器实验，不能作为框架实际内存变化的唯一依据。
+共享表统计、`mallinfo2` 分配量及进程峰值 RSS 分别报告。
 
 同步架构精简增加了错误请求基准。用 `build_layout_study.py --names errors` 构建
 两个版本的 `mmio_errors.cpp`，再对配套二进制运行：
@@ -40,8 +39,6 @@ python3 benchmarks/measure_layout_study.py --base /tmp/study-before \
 [同步架构精简报告](../docs/Performance-Architecture-Sync.md)。
 
 ## pre_access / 地址分发对照
-
-本文钩子优化报告以无异步的 `cec42e1f3a25bd8804129ff4c349a0dd54128742`（0.37.0）及回移同一优化的版本配对；PR 集成 main 0.38.0。复现时不要混用这两套版本。
 
 `mmio.cpp` 支持 `REGFW_BENCH_PRE_ACCESS=none|global|view|both`。钩子执行可观察的计数操作；三个手写参照均先执行钩子，再做地址解码与 switch 分发。`switch_raw` / `switch_normalized` 保留简单解码参照；`range_switch` 使用 if/else 范围链再进入 1000-case switch，`REGFW_BENCH_RANGES=1|10|100` 选择每个寄存器区的范围数（混合布局另外经过 8 个 VF 范围）。编译器可以正常优化范围链。正确性对照检查有效 1/2/4 字节访问的寄存器值、读响应、回调效果和钩子次数。分别编译两个版本时必须使用**同一份新的 mmio.cpp**，各自配套版本的头文件和库，保持优化等级一致。
 
@@ -88,59 +85,22 @@ python3 benchmarks/measure_routes.py --baseline-prefix "$RESULTS/full" \
 
 Linux x86-64 可把 `sample_ips.cpp` 链接进单布局基准，并用 `-no-pie` 生成诊断二进制。设置 `REGFW_SAMPLE_IPS=/absolute/samples.txt` 后收集 IP，使用 `python3 benchmarks/summarize_ips.py BINARY SAMPLES` 按符号汇总。采样运行会扰动时序，正式性能比较不链接/启用它。
 
-## 历史完整复测入口
-
-```bash
-make -f build.mk bench BUILD=build-bench JOBS=2
-# 或者显式运行（需先构建 bench_* 可执行文件）
-REGFW_BENCH_BUILD=build-bench CXX=g++ python3 benchmarks/measure_formula.py
-```
-
-Linux 使用 `/usr/bin/time -v`，macOS 使用 `-l`；编译耗时使用 `time.perf_counter()` 实测，最大 RSS 从对应子进程的输出解析。0.36.0 尚未执行真实 QEMU 负载性能测试，旧版本报告仅供历史比较。
-
----
-
-# 当前版本性能复测
-
-只保留当前使用的基准和脚本，不随 SDK 打包历史 JSON、日志、二进制或中间报告。
-
-Linux x86_64、GCC 13/C++20、Python 3、GNU Make、taskset：
+## 编译和初始化
 
 ```sh
-python3 benchmarks/reproduce.py --baseline /absolute/regfw-0.32.0 \
-  --out /absolute/empty-results --cmake cmake
+make -f build.mk bench BUILD=build-bench JOBS=2
 ```
 
-输出目录必须在两个 SDK 之外且为空。脚本先构建，再固定 CPU 交替测量；测试普通/带回调、30% 映射/纯映射、logger 未绑定/已绑定 INFO 两种模式。初始化含大数组、宽寄存器、完整 DAG 以及 Summary/Full 格式化；编译测量包含 64/128/256 元素与单独布局实现的 `make -j32`。最后使用同一旧版二进制进行 A/A 对照，观察环境波动。生成的结果 JSON 和日志仅写入输出目录。
+`measure_formula.py` 汇总编译耗时、峰值 RSS、初始化与 MMIO。
 
-编译峰值 RSS 是单个编译进程树的 KiB；并行试验记录 cgroup 内存，包含环境和页缓存，二者不可混用。digest 排除地址相关的函数指针和 source_location，比较所有静态计划语义字段。微基准不等于 QEMU 整机性能。
-
-脚本兼容 0.32.0 基线；不要混用两个版本的头文件和库。各项量化结果和限制见 [Performance](../docs/Performance.md)。
-
-头文件入口成本矩阵（方向三）：
+头文件入口成本矩阵：
 
 ```sh
 python3 benchmarks/measure_headers.py --record /absolute/header-results \
-  --sdk /absolute/regfw-0.33.3 --cxx g++ --tus 8
+  --sdk /absolute/regfw --cxx g++ --tus 8
 ```
 
 对同一声明负载分别测量轻量入口 `regfw/bundle.hpp` 与完整入口 `regfw/regfw.hpp` 的单个消费 TU、各自预编译设备头（PCH）后的 TU、以及 8 个 TU 的并行 clean build；记录 PCH 自身构建成本并校验编译器确实使用了 PCH。
-
-POE 型稀疏布局基准（0.33.3）：
-
-```sh
-# 快路径（默认）与强制完整构建器对照
-for m in "" "-DPOE_FORCE_FULL=0"; do
-  python3 benchmarks/measure_compile.py --record /absolute/poe$m -- \
-    g++ -std=c++20 -O2 -DNDEBUG -fno-strict-aliasing \
-    $m \
-    -I/path/to/regfw/include -I/path/to/regfw/third_party/hlog/include \
-    -c benchmarks/poe_layout.cpp -o /absolute/poe$m.o
-done
-```
-
-约 2000 个寄存器声明、8 VF、PF-shared 在 17 个 business 视图中重挂载、32/64/128/512/2048-bit 混合、稀疏数组与双 ACC 地址族；无真实地址冲突。
-
 
 ## 单线程 RegView 与 MMIO 优化
 
@@ -148,5 +108,4 @@ done
 - `handles.cpp` / `measure_handles.py`：原生指针、`.at(i).bits`、`.at(i).ref()` 对照；构建和配对命令见 [Performance-Handles](../docs/Performance-Handles.md)。
 - `measure_hooks.py` / `measure_routes.py`：pre_access 与 identity/index 组合，见 [Performance-Hooks](../docs/Performance-Hooks.md)。
 - `sample_ips.cpp` / `summarize_ips.py`：可选 Linux x86_64 IP 采样，诊断结果见 [Performance-Dispatch](../docs/Performance-Dispatch.md)；正式计时不链接采样器。
-
 - `snapshot_stream.cpp`：9 实例×2048 独立 u32，或 9×65536 u32 数组，真实 bank Writer/Reader 内存流及恢复校验。编译需 `-Iextras -Itests/snapshot_backend`，仅基准使用测试后端头；命令与结果见 [固定生命周期与快照测量](../docs/Performance-Fixed-Lifetime.md)。

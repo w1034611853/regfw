@@ -1,21 +1,6 @@
-> 0.33.3：前端 API 保持；只声明寄存器的头可改用 <regfw/bundle.hpp>，见 [LayoutCompilation](LayoutCompilation.md)。当前测量见 [Performance](Performance.md)。
+# regfw 0.38.0 同步版使用说明
 
-本分支面向固定生命周期、单线程 QEMU SysBus 设备，基于无异步队列的 0.37。初始化顺序是：建立 bank → 注册全部 identity/index resolver、pre_access、读写/完成回调 → `finish()` → MMIO。`finish()` 同时冻结布局与绑定；之后 set/clear/首次注册均抛 Configuration，`defer_*` 不再允许未绑定依赖通过 finish。函数捕获的路由表、寄存器值及 logger 等级仍可变化，resolver 结果仍逐次求值。
-
-RegView 只借用实体存储，不持有生命周期计数，也不检测 bank 销毁。使用 view、原生引用及 bridge 时必须保持 bank 存活；移动 bank 保持实体地址。`is_alive()` 仅表示句柄已绑定。框架不再维护 MMIO 重入、entity borrow 或钩子退休保护；同一 map 的 MMIO/save/load 不可在回调中递归进入。这些是本分支的使用前提，不是运行时保护。
-
-流快照 `ar(bank)` / `bank.save(file)` 改为紧凑格式：布局 hash、实际位宽的实体值及活动事务，省去 schema 明细。无参 `bank.save()` 仍返回完整 `VersionedSnapshot` v2，供内存检查与兼容用途。旧版 bank 流不能直接由新版 load 读取，需要重新生成或在旧版解析为 VersionedSnapshot 后显式加载。头文件、库和设备必须配套重编译。详情见 [固定生命周期优化](Performance-Fixed-Lifetime.md) 和 [快照格式](Snapshot.md)。
-
-以下旧版本记录若涉及生命周期或流格式，以本节为准。
-
-# regfw 0.33.3：面向 Agent 的使用说明与 API 契约
-
-适用版本：**regfw 0.33.3，配套 hlog 3.2.1，C++20**。本文根据该发布包的公开 API、运行时实现及测试核对编写，供编写设备模型的 Agent 直接使用。本文描述当前行为，不把建议或未来能力写成已有 API。
-
-本文可以作为 SDK 根目录的新 README 使用。使用本版头文件时必须同时链接本版编译库；本版**不是 header-only 库**。不要从旧 Rust 实现、旧版 C++ 文档或通用寄存器框架经验推测接口。
-
-
-**低上下文使用方式**：首次只读 §0～§2，按 §1 选择方案，再按任务读取下面对应章节。不要每次从头读到尾。章节标题可用于全文搜索；本文的完整示例不依赖其他文档。
+适用于 C++20、配套 hlog 的同步 SDK。先读[维护指南](../AGENT.md)了解初始化和生命周期约定。
 
 | 当前任务 | 必读章节 |
 |---|---|
@@ -86,7 +71,7 @@ RegView 只借用实体存储，不持有生命周期计数，也不检测 bank 
 
 `bank->xxx` / `(*bank).xxx` 取得 bundle 成员；`bank.map()` 取得 map。`reg::space(size).name(name).root(root_name).logger(logger).reset_scope(scope)` 设置构建参数。`.finalize()` 可以在构建时直接 finish，但有必需 resolver 时通常不适合，因为还来不及绑定。
 
-此 0.37 优化分支专用于单线程设备：view 的创建、复制、销毁、访问与 Bank 生命周期必须串行执行。RegView 不维护引用计数，不检测 bank 是否已销毁。无需更改 `.at()`、`.ref()`、`.bits` 或回调 API，升级时必须一起重编译头文件和库。性能与集成说明见 [Performance-Handles](Performance-Handles.md)。
+同步版用于单线程设备：view 的创建、复制、销毁、访问与 Bank 生命周期必须串行执行。RegView 不维护引用计数，不检测 bank 是否已销毁。无需更改 `.at()`、`.ref()`、`.bits` 或回调 API，升级时必须一起重编译头文件和库。性能与集成说明见 [Performance-Handles](Performance-Handles.md)。
 
 bank 移动时底层对象地址保持稳定；现有 view 和 C bridge 仍指向同一底层对象。`bank.clear()` / 销毁会使 view 失效，此后不得再访问；之前取得的原生引用/指针仍遵循 C++ 生命周期规则，不能指望框架保护悬空引用。lambda 捕获的设备、FIFO、logger 必须活得足够久；临时 `info` 和其中的引用不能保留到异步任务。
 
@@ -252,7 +237,7 @@ REG(MIXED, std::uint32_t,
 
 混合规则 mask 不能重叠；未覆盖位保持写值不变、读取仍可见。整个寄存器不是内建纯 RO 时，不能因为最终值没有变化就推断不会执行 on_write。
 
-自定义 behavior：`reg::FieldBehavior` 的 write 签名为 `RegData(current,value,mask)`，返回转换后的值；read 签名为 `RegData(RegData& stored,RegData mask)`，可修改 stored 并返回候选读值。宽版本是 `reg::WideFieldBehavior`，参数改为 WideRegData。通过 `REG_DYNAMIC(..., reg::at(...).access(behavior))` 使用，通常只在必须改变存储变换规则时选择。behavior 执行期间同一实体被 borrow 保护，不能递归访问它；设备业务优先放回调中。
+自定义 behavior：`reg::FieldBehavior` 的 write 签名为 `RegData(current,value,mask)`，返回转换后的值；read 签名为 `RegData(RegData& stored,RegData mask)`，可修改 stored 并返回候选读值。宽版本是 `reg::WideFieldBehavior`，参数改为 WideRegData。通过 `REG_DYNAMIC(..., reg::at(...).access(behavior))` 使用，通常只在必须改变存储变换规则时选择。behavior 在同步访问中执行，禁止递归进入同一 map 的 MMIO。设备业务优先写在回调中。
 
 ## 6. 内部访问、数组与 view
 
@@ -1211,25 +1196,13 @@ C bridge 不提供锁、发起 vCPU ID、设备时钟、DMA、IRQ 或事务调�
 
 ## 22. 兼容接口、低级接口及维护边界
 
-删除项不属于兼容接口：Split64Policy / split64 builder，以及 CommandPort / command window / REG_COMMAND_REGION。旧代码需要按 Migration.md 迁移。
+新设备用 `AddressView` / `AddressSpace` 组织地址。升级旧映射时参考[迁移说明](Migration.md)。
 
-旧 Window DSL 已删除。新模型使用 AddressView / AddressSpace；旧代码可维护这些兼容接口：
+`RegScope` 用于低级实体构建。保留两个既有所有权成员时，可用
+`reg::init_bank(unique_ptr<RegisterMap>&, unique_ptr<Root>&, spec)`，初始两个指针都为空。
 
-| 接口族 | 当前定位 |
-|---|---|
-| `REG_APERTURE` / `REG_REPEAT_APERTURE` | 在声明时同时分配地址和存储 |
-| 带 `reg::aperture().at(...).size_bytes(...).stride(...)` 的实体声明 | 兼容 aperture 模式 |
-| `REG_VIEW` / `REG_REPEAT_VIEW` + RegViewBundle | 旧式地址 view 容器；不能创建 REG 实体 |
-| `REG_GROUP` / `REG_REPEAT_GROUP` | 旧式有地址嵌套组 |
-| `REG_LAYOUT(.views=...,.aliases=...,.identities=...,.reserved=...)` | 旧式并列表布局 |
-| `reg::view(source).to(target)` / `reg::alias(source).to(target)` | 旧式映射构建器 |
-| `RegScope` | 低级实体构建入口。地址组合使用 `AddressSpace` |
-| `reg::init_bank(unique_ptr<RegisterMap>&,unique_ptr<Root>&,spec)` | 管理既有两个指针成员；两者初始必须为空 |
-| `map.create_reg<T>(address,name,spec)` | 直接创建有地址的单 REG，用于小测试/底层适配 |
-
-不要在同一根 REG_LAYOUT 中同时使用递归 root 和旧式并列表；会拒绝。不要给本来无地址的实体又套一层已经分配地址的旧 aperture 并再次手算同一基址。低级 create_reg 的 address 是直接 map 地址，spec 的 at 偏移不应再被当成需要叠加的另一层布局；推荐使用 reg::at(0) 的属性 spec。
-
-如果必须维护旧式 identity 的 `IdentityRemapMode::IdentityOnly`，它只记录身份元数据，不像View 的 RedirectBank 那样重新选第 j 个地址窗口。新设计不要从旧模式推断 window 行为。
+`map.create_reg<T>(address, name, spec)` 的 `address` 是直接 map 地址，属性 spec 使用
+`reg::at(0)`。声明完全部寄存器并完成注册后调用 `map.finalize()` 安装默认根 View。
 
 ### 静态地址描述符
 
@@ -1239,7 +1212,7 @@ REG 宏同时生成 `NAME_spec` 和 `NAME_address`。例如 §3 中的 `CoreRegs
 
 ### 文档验证记录
 
-四个 runnable 程序是文档中的回归样例；完整快照另由 tests/snapshot.cpp 验证原有 vmstate_fields/module_var_* 字段流与分拍续传。具体本次构建/测试记录见 SDK 的 VALIDATION.md；真实 QEMU 设备 savevm/loadvm 和 Host 多线程安全不由内存后端测试代替。
+四个 runnable 程序是文档中的回归样例；完整快照另由 tests/snapshot.cpp 验证原有 vmstate_fields/module_var_* 字段流与分拍续传。最新构建与测试记录见[同步版验证](Performance-Architecture-Sync.md#构建与兼容验证)。
 
 ### 文档维护契约
 
@@ -1254,60 +1227,3 @@ REG 宏同时生成 `NAME_spec` 和 `NAME_address`。例如 §3 中的 `CoreRegs
 PF 自己的业务存储应使用独立的 `REG_ENTITY(pf_business, PoeVfRegs, reg::entity().reset_scope({reg::ResetScope::Pf}))`；VF 用 `REG_REPEAT_ENTITY(vf, PoeVfRegs, VF_COUNT, reg::entity().reset_per_instance(reg::ResetScope::Vf))`。不要为 PF 在 VF 重复数组后额外加一项：若 count 为 VF_COUNT+1，vf[VF_COUNT] 确实是独立实体，并会被标为 Vf(VF_COUNT)，打印它不表示硬件新增了一个 VF。PF 业务实体有独立 PF 入口，不能当作 VF 重复族的副本省略。
 
 布局表中的地址映射行统一显示 `VIEW`；映射实体时显示 `VIEW → entity: <原始实体组或 REG 名称>`，`reset` 表示目标存储的复位归属。PF、PF_VF、VF 的多个入口会显示同一个共享实体目标名，不再把每个入口标成新 ENTITY。折叠重复族的目标名/复位信息取 i=j=k=0 代表实例；实体范围列是映射边界，不表示整段地址都有实体寄存器。
-
-## 按 AddressView 绑定 pre_access（0.24.0）
-
-优先使用命名键，布局只声明挂载范围，在 bank 初始化后绑定设备函数：
-
-```cpp
-REG_PRE_ACCESS(CheckBusiness); // 放在命名空间作用域
-
-// REG_LAYOUT 中的片段，vf[i] 为此前声明的实体实例：
-auto business = reg::view("BUSINESS", POE_BUSINESS_SIZE)
-    .map(vf[i])
-    .using_pre_access(CheckBusiness);
-
-// bank 初始化后、finish 前：
-reg_bank.map().set_pre_access(CheckBusiness,
-    [this](const reg::RegAccessInfo& info) {
-        // 此处做设备检查；info.address 是原请求地址。
-        // info.view_path 是 identity 转换后实际选中目标的 View 路径。
-    });
-```
-
-独立的小函数也可直接 `.pre_access(fn)`，fn 签名为 `void(const RegAccessInfo&)`。builder 返回新对象，必须使用返回值；同一 View 只能声明一个钩子。不要在 REG_LAYOUT 中捕获局部变量的引用，或捕获可能随 Bundle 构造返回而移动的 this；设备函数推荐使用命名键，等 bank 构建完成后绑定。重复工厂里的 i 如需直接捕获必须按值。
-
-钩子执行顺序为 **全局 map.set_pre_access(fn) → 最终选中路径的父 View → 子 View**，发生在 identity、权限/宽度和 access-group 下标解析后、behavior/事务更新前。动态 VF i→j 时执行 j 的实际目标路径，保留来源 info.address/request_id，info.index/resolved_id 已是转换结果。只执行获胜分支；透明空洞落到另一分支时不会执行空洞 View 的钩子；共享实体在不同入口可使用不同检查。
-
-每次有效 MMIO beat 都调用，包括宽 REG 的暂存写和快照续读。RO 忽略写、入口权限拒绝、未映射/保留地址及 resolver 失败不会运行钩子。内部 ref()/data 更新、reset、save/load、describe_layout、explain_address 不运行钩子。
-
-命名键未绑定时 finish 报 Configuration，defer_pre_access 不绕过验证。set/clear 只能在 finish 前调用；has_pre_access 可随时查询。需要业务条件禁用时，在已绑定函数中判断捕获的状态。
-
-异常沿用原有 pre_access 行为：打印并停止后续钩子、behavior 和寄存器回调；写返回 Ignored，读返回 0（状态可能为 Ok），不回退其他映射。不要用此异常机制要求明确的总线 AccessError；此类需求仍在解析/验证阶段处理。钩子是 void，不使用返回 false 表达拒绝。
-
-钩子列表在构建时预编译，无钩子的记录为空指针；MMIO 不按 View 数量扫描。函数、捕获对象和钩子链不保存到 bank 快照；恢复前按设备初始化流程重建布局并绑定，外部业务状态由父对象保存。
-
-0.24.1 优化了钩子调用：普通 MMIO 调用不复制函数的 shared_ptr；仅当回调在 pre_access 链执行期间重绑/清除时，保留旧函数至本次 pre_access 链结束。回调内自修改仍受支持，后续钩子读取最新绑定；旧捕获对象的析构时点可能延后到本次 pre_access 链结束。框架仍不支持未同步的并发重绑。
-
-## 0.26.0 MMIO 执行计划与回调适配
-
-公开 Entity/View、resolver、pre_access、回调和 transaction 写法保持。finish 把稀疏页目录冻结为连续探测表，并为已映射地址生成 32 字节分发记录；原生 32-bit RW 的数据地址、掩码和静态允许方向已确定，不再逐拍通过冷元数据计算存储地址。大地址间的空洞仍不分配页。
-
-原生 32-bit 无 identity/index 派生或 pre_access、方向 Independent 且没有访问日志时，回调使用轻量调用帧。完整 info 在与用户函数一起编译的适配器中准备，让编译器删除该函数未使用的字段准备；需要完整字段、按值复制 info 或 typed index 的回调仍得到全部语义。读回调的两条适配路径共享同一个可变函数对象，不能各自复制一份计数或 FIFO 状态。异常和回调内启用日志时仍能构造完整诊断信息。
-
-常见的单 uint32 坐标、无条件命名 index 映射减少字段查找；仍逐拍调用当前 resolver，并执行原有维度范围、映射冲突和容量检查。其他条件、多个字段、自定义字段转换、部分访问、RC/W1C、自定义 codec/behavior、宽寄存器和事务保留完整路径。
-
-晚绑定回调、resolver 换绑/清除、全局/View pre_access 和动态日志等级仍生效。on_read 返回值不写回实体，nullopt 使用回调前候选值；读完成顺序、异常和快照 v2 不变。回调 info 只在同步调用期间借用，值复制保留有效字段；名称/View 路径仍借用，禁止 memcpy 整个 info。每 Map 仍需外部同步，不允许同 Map MMIO 重入。
-
-本版以额外的紧凑分发记录和冻结页索引换取访问速度；读源保存一份函数状态和两条调用适配器，初始化开销增加。分发表、函数和缓存指针不进入快照。头文件和库必须一起升级并重新编译。数据、额外内存说明和测试范围见 [MMIO 性能报告](Performance.md)。
-
-
-## 0.27.0 固定布局入口
-
-固定布局、自动成员描述、layout.vf[i] 及 REG_STATIC_INDEX 的准确用法见 [StaticLayout](StaticLayout.md)。REG_LAYOUT 的 [](auto layout) 入口编译期生成计划；原 [&]{...} 入口仍为动态构建，不会自动转换。初始化默认遵循项目优化等级，REGFW_FAST_COMPILE_INIT 可恢复旧编译策略。功能/快照约束沿用本指南。
-
-## 当前日志与编译优化行为
-
-最终日志文本只在对应等级启用时格式化；0.32.0 的映射快路径还会在构造完整访问上下文之前检查访问日志等级。日志等级可在运行时、resolver 或 on_read 内修改，本次访问仍按原调用顺序执行。读写回调、pre_access、身份/下标解析器接收的字段和值保持原契约。
-
-静态规则数组按块计数只是编译器优化；地址空洞、覆盖、保留区和运行期分发没有新限制。实际输出仍逐 word 验证。初始化直接绑定 word 索引，仍为每个 bank 建立自己的实体和回调绑定，不共享可变状态。

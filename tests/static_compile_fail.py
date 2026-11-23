@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""Compile-fail contracts for layouts which must never reach machine init.
+"""Compile-fail tests for the symbolic factory and the lightweight header.
 
-Structural errors are diagnosed during consteval layout compilation.
-Register/register conflicts are diagnosed by the runtime installer (see
-formula_geometry.cpp), so they are not compile-fail cases here.
+Layout geometry errors are checked by the runtime installer.
 """
 from pathlib import Path
 import os,subprocess,sys,tempfile

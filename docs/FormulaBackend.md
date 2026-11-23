@@ -29,46 +29,9 @@ REG/Entity/Bundle declaration + View DSL
 - `src/internal/formula_decoder.hpp`：共享 EntityLayout Hash、View 绑定及地址查找。
 - `src/runtime/access.cpp`：寄存器访问执行、AccessInfo 装配、Scalar/Mapped/Generic、Callback 与 Transaction。
 
-## 验证边界
+## 验证
 
-编译期布局检查迁移到构建时运行的原生 C++ 后，**非法几何布局的异常出现时机改变**：由旧的 constexpr 编译错误变成初始化期配置错误。捕获限制、声明 API、轻量头误用仍在编译期诊断。
-这不是 ABI 承诺；用户需要将头文件和静态库配套重编译。性能与 QEMU 整机要求在真实 POE/DAG 上测量，不得仅凭合成示例断言 4 分钟问题已完全消失。
-
----
-
-### 历史版本性能记录（不代表 0.36.0 实测）
-
-## 历史性能数据
-
-### 7.1 MMIO A/B（GCC 16.2 -O2，Apple M 系主机，与冻结构建交替测量；副本见 `benchmarks/results-0.35.1/`）
-
-对照基准为 0.34.0 GLM 构建的 StaticWord 逐 word 后端（同一台机器、同一编译器与优化级别、
-相同访问 trace、交替执行取中位数）。mixed30 = 1000 寄存器 + 30% VF identity 映射负载
-（`benchmarks/mmio.cpp`），ns/access：
-
-| 负载 | 0.35.0 | **0.35.1（静态）** | StaticWord | 0.35.1 vs StaticWord |
-|---|---|---|---|---|
-| rw hot read | 44.5 | **28.3** | 24.8 | +14% |
-| rw hot write | 41.7 | **28.5** | 24.8 | +15% |
-| rw random read | 46.7 | **33.1** | 36.2 | **快 8.5%** |
-| rw random write | 45.3 | **31.8** | 34.6 | **快 8%** |
-| rw mapped read | 111.9 | **77.5** | 83.0 | **快 7%** |
-| rw mapped write | 104.0 | **75.5** | 80.1 | **快 6%** |
-| callbacks hot read | 68.2 | 50.6 | 33.3 | +52% |
-| plain（无 identity）random read | 24.4 | **12.9** | 26.8* | **快 52%** |
-
-\* plain 行的 StaticWord 数字来自 0.34.0 动态构建（静态构建不含 plain 负载）。
-对照参考：基准自带的手写 switch-case（不执行权限/回调/事务检查，语义不等价）在
-4.6–26ns 区间，仅作数量级参照，不作为等价对照。
-
-验收目标「Scalar32、Mapped 和 Random 相对旧后端回退不超过 5%」：random 与 mapped
-（读/写）已**快于** StaticWord；hot 混合访问仍慢 ~14%（~3.5ns/access），来源是 30%
-identity 子路径无法使用逐 word redirect 表而需两次算术解码 + resolver；有界 word memo
-与 zone cache 已覆盖其余分量。callbacks 负载（on_read/on_write 全开）仍慢于 StaticWord
-的预建 word 表，是当前公式后端的主要剩余差距。
-
-### 7.2 编译与安装（GCC 16.2 -O2；`benchmarks/measure_formula.py`）
-
-副本见 `benchmarks/results-0.35.1/`。编译期、峰值 RSS 与静态元数据相对 0.35.0 持平或
-更低；动态布局安装成本从逐元素 mount 降为每声明段一个 mount（元数据不再随元素数线性
-膨胀）。真实 QEMU/POE/DAG 业务源码未接入，跨平台数字不能据此宣称。
+共享几何、地址空洞和非单调数组由 `formula_geometry`、`formula_regressions` 和
+`formula_fastpaths` 验证。 `formula_diff` 比较动态和静态布局的结果，
+`formula_golden` 对比冻结的可见地址记录。当前性能与容量取舍见
+[同步架构精简报告](Performance-Architecture-Sync.md)。

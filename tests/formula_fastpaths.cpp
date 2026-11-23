@@ -1,13 +1,5 @@
-// Focused regression coverage for the 0.35.1 fast-path machinery:
-//  - after finalize, callback/borrow changes must be observed immediately
-//    by the cacheless Formula Decoder
-//  - repeated hole accesses must remain unmapped without stale decode state
-//  - scope comparison must index each chain from its own end (the 0.35.0
-//    release indexed one chain with the other's length)
-//  - dynamic declaration-pattern mounts: dense, strided, interleaved tables
-//    (rank 2 and rank 3), non-power-of-two strides
-//    and 64-bit wide arrays
-//  - the same shapes through the compiled-static path
+// Prepared dispatch coverage for array shapes, callback bindings, overlapping
+// scopes, identity redirection and shared View tables.
 #include <regfw/regfw.hpp>
 #include <iostream>
 #include <stdexcept>
@@ -120,22 +112,22 @@ void exercise_geometry() {
 }
 
 // ---- dynamic execution eligibility after finalize -------------------------
-struct MemoRegs : reg::RegEntityBundle {
-    REG_BUNDLE(MemoRegs);
+struct PreparedRegs : reg::RegEntityBundle {
+    REG_BUNDLE(PreparedRegs);
     REG(A, std::uint32_t, reg::at(0));
     REG(B, std::uint32_t, reg::at(4));
-    REG_SCHEMA(&MemoRegs::A, &MemoRegs::B);
+    REG_SCHEMA(&PreparedRegs::A, &PreparedRegs::B);
 };
-struct MemoLayout : reg::Bundle {
-    REG_BUNDLE(MemoLayout);
-    REG_ENTITY(r, MemoRegs);
+struct PreparedLayout : reg::Bundle {
+    REG_BUNDLE(PreparedLayout);
+    REG_ENTITY(r, PreparedRegs);
     REG_LAYOUT([&] {
-        return reg::address_space("MEMO").map(reg::view("V", 8).map(r), 0);
+        return reg::address_space("PREPARED").map(reg::view("V", 8).map(r), 0);
     });
 };
 
-void memo_dynamic_state() {
-    reg::RegisterBank<MemoLayout> bank(reg::space(8).name("MEMO").finalize());
+void prepared_dispatch_bindings() {
+    reg::RegisterBank<PreparedLayout> bank(reg::space(8).name("PREPARED").finalize());
     auto& map = bank.map();
     bank->r.A.ref() = 0x11;
     bank->r.B.ref() = 0x22;
@@ -147,7 +139,7 @@ void memo_dynamic_state() {
         CHECK(bank->r.A.ref() == 0x33);
     }
     // Callbacks configured before finish participate in prepared dispatch.
-    reg::RegisterBank<MemoLayout> hooked(reg::space(8).name("MEMO"));
+    reg::RegisterBank<PreparedLayout> hooked(reg::space(8).name("PREPARED"));
     unsigned reads = 0, writes = 0;
     hooked->r.A.on_read([&](std::uint32_t value, const reg::RegAccessInfo&) {
         ++reads;
@@ -162,7 +154,7 @@ void memo_dynamic_state() {
     CHECK(hooked.map().mmio_write(4, 0x44).success());
     CHECK(hooked->r.B.ref() == 0x44 && writes == 1);
     // Another fresh bank: plain reads work again end-to-end
-    reg::RegisterBank<MemoLayout> bank2(reg::space(8).name("MEMO").finalize());
+    reg::RegisterBank<PreparedLayout> bank2(reg::space(8).name("PREPARED").finalize());
     bank2->r.A.ref() = 0x55;
     for (int i = 0; i < 5; ++i)
         CHECK(bank2.map().mmio_read(0) == 0x55);
@@ -378,7 +370,7 @@ int main() try {
     exercise_geometry<DynLayout>();
     table_kinds();
     exercise_geometry<StaticLayout>();
-    memo_dynamic_state();
+    prepared_dispatch_bindings();
     scope_depth_priority();
     redirected_behavior(false);
     redirected_behavior(true);
