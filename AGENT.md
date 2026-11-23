@@ -1,4 +1,4 @@
-# regfw 0.37.0：开发与集成约定
+# regfw 0.38.0 同步版开发与集成约定
 
 本分支面向固定生命周期、单线程 QEMU SysBus 设备，基于无异步队列的 0.37。初始化顺序是：建立 bank → 注册全部 identity/index resolver、pre_access、读写/完成回调 → `finish()` → MMIO。`finish()` 同时冻结布局与绑定；之后 set/clear/首次注册均抛 Configuration，`defer_*` 不再允许未绑定依赖通过 finish。函数捕获的路由表、寄存器值及 logger 等级仍可变化，resolver 结果仍逐次求值。
 

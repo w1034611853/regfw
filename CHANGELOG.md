@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.38.0
+
+**同步版，发布标签 `v0.38.0-sync`。**
+
+- 平坦寄存器和 `AddressSpace` 共用 `FormulaDecoder`。旧手动映射迁移到 `REG_LAYOUT` 和 `AddressSpace`。
+- 交错数组统一使用排序表，在配置时检查重叠和容量。
+- MMIO 内部校验失败直接返回状态，映射访问按需构造回调信息和错误诊断。
+- 全局身份 resolver 在转换为 `uint32_t` 前拒绝负值和溢出值。
+- 迁移清单、性能对照和验证记录见[同步架构精简报告](docs/Performance-Architecture-Sync.md)。
+
 ## 0.37.0
 
 **Synchronous scalar execution and callback storage.**

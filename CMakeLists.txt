@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 if(POLICY CMP0144)
   cmake_policy(SET CMP0144 NEW)
 endif()
-project(register_framework_cpp VERSION 0.37.0 LANGUAGES C CXX)
+project(register_framework_cpp VERSION 0.38.0 LANGUAGES C CXX)
 # Implementation modules: public include/regfw/* paths remain unchanged.
 add_library(regfw STATIC
   src/dsl/declarations.cpp
