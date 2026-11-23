@@ -9,7 +9,7 @@ detail::AccessFailure Groups::apply_index(const detail::StaticIndexRule& rule,
     if (auto error =
             info.index_fields.insert(rule.source, rule.source_name, *coordinate, rule.dimension))
         return error;
-    RegData value;
+    RegData value{};
     if (auto error = slot.resolve(info, *coordinate, value))
         return error;
     return info.mapped_fields.insert(rule.output, rule.output_name, value, rule.dimension);
@@ -78,7 +78,7 @@ detail::AccessFailure Groups::Plan::run(RegAccessInfo& info) const {
                     enabled = d.condition(info);
                 }))
                 return error;
-        RegData value;
+        RegData value{};
         if (enabled) {
             auto error = d.resolver_slot ? d.resolver_slot->resolve(info, source->value, value)
                                          : detail::invoke_index_resolver(

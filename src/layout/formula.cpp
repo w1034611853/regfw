@@ -530,7 +530,7 @@ class FormulaInstaller {
             if (!s.reserved)
                 continue;
             if (s.size > UINT64_MAX - s.base)
-                throw "formula layout: ReserveRangeOverflow";
+                throw Error("formula layout: ReserveRangeOverflow", ErrorKind::Configuration);
             decoder->reserves_.push_back({s.base, s.base + s.size, id});
         }
         std::sort(

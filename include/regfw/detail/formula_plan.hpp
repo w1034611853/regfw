@@ -8,13 +8,10 @@
 //   REG declaration mount          ->  one FormulaMountSpec per mount
 //   REG declaration shape          ->  one shared FormulaArraySpec per shape
 //
-// The decoder inverts an element lattice. Three exact forms are supported:
+// The decoder inverts an element lattice using one of two exact forms:
 //
 //   * contiguous / super-increasing (monotone) lattices: O(rank) divisions;
-//   * two-dimensional interleaved lattices: one gcd reduction plus a modular
-//     inverse, so dims(2,3) strides(0x180,0x100) needs no element table;
-//   * higher-rank interleaved lattices: a shared offset-sorted record table
-//     (the only shape for which the DSL does not determine a closed form).
+//   * non-monotone lattices: a shared offset-sorted record table.
 //
 // Element tables are per declaration shape, never per MMIO word, and are
 // shared by every mount of that shape.

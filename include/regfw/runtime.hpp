@@ -773,14 +773,20 @@ bool overlaps(std::uint64_t a, std::uint64_t n, std::uint64_t b, std::uint64_t m
 std::string join_name(std::string_view prefix, std::string_view name);
 } // namespace detail
 namespace detail {
+inline constexpr IndexFailure missing_resolved_identity{ErrorKind::Device, "no resolved identity"};
 template <class V, class R>
 CheckedIndex checked_access_result(R result) {
-    if constexpr (std::signed_integral<R>)
+    if constexpr (std::signed_integral<R>) {
+        static constexpr IndexFailure negative{ErrorKind::Access, "negative mapped element"};
         if (result < 0)
-            return {ErrorKind::Access, "negative mapped element"};
-    if constexpr (std::integral<V>)
+            return CheckedIndex::failure(negative);
+    }
+    if constexpr (std::integral<V>) {
+        static constexpr IndexFailure overflow{ErrorKind::Access,
+                                               "mapped value exceeds declared field type"};
         if (detail::to_bits(result) > std::numeric_limits<V>::max())
-            return {ErrorKind::Access, "mapped value exceeds declared field type"};
+            return CheckedIndex::failure(overflow);
+    }
     return {detail::to_bits(detail::value_from_data<V>(detail::to_bits(result)))};
 }
 template <class F>
@@ -791,7 +797,7 @@ AccessFailure invoke_index_resolver(F&& fn, RegData& value) {
         }))
         return error;
     if (result.error)
-        return {result.kind, result.error};
+        return {result.error->kind, result.error->message};
     value = result.value;
     return {};
 }
@@ -946,11 +952,16 @@ class RegisterMap {
     void mutable_bindings() const;
     void region_check(std::uint64_t base, std::uint64_t n) const;
     AliasEntry resolve_static(std::uint64_t address, unsigned size) const;
-    inline detail::AccessFailure
-    resolve_identity(const detail::IdentityWindow& window,
-                     const IdentityResolveRequest& request,
-                     AccessIdentity& identity,
-                     std::source_location at = std::source_location::current()) const;
+    enum class IdentityCheck : std::uint8_t { Ok, Unbound, InvalidId, OutOfRange };
+    inline IdentityCheck resolve_identity(const detail::IdentityWindow& window,
+                                          const IdentityResolveRequest& request,
+                                          AccessIdentity& identity) const;
+    static detail::AccessFailure identity_failure(IdentityCheck status, std::source_location at);
+    detail::AccessFailure
+    resolve_identity_checked(const detail::IdentityWindow& window,
+                             const IdentityResolveRequest& request,
+                             AccessIdentity& identity,
+                             std::source_location at = std::source_location::current()) const;
     void install_default_layout();
     detail::AccessFailure resolve(std::uint64_t address,
                                   unsigned size,
@@ -965,6 +976,10 @@ class RegisterMap {
     template <bool Writing>
     std::optional<RegMmioReadResult>
     try_fast_mmio(std::uint64_t address, RegData value, unsigned size, const AliasEntry*& selected);
+    RegMmioWriteResult write_mmio_fallback(std::uint64_t address,
+                                           RegData value,
+                                           unsigned size,
+                                           const AliasEntry* selected);
     template <bool Writing>
     std::optional<RegMmioReadResult> fast_scalar(std::uint64_t address,
                                                  RegData value,
@@ -1000,11 +1015,21 @@ class RegisterMap {
                    std::string_view name,
                    const RegAccessInfo* info = nullptr,
                    const detail::AccessFailure* failure = nullptr) const noexcept;
+    void log_index_failure(std::string_view name,
+                           const detail::ScalarAccessFrame& frame,
+                           const char* message,
+                           std::string_view subject,
+                           std::source_location at) const noexcept;
     RegMemTxResult request_error(RegTransactionKind kind,
                                  std::uint64_t address,
                                  RegData value,
                                  unsigned size,
                                  const detail::AccessFailure& failure) const noexcept;
+    template <class MakeError>
+    RegMmioReadResult scalar_request_failure(RegTransactionKind kind,
+                                             std::uint64_t address,
+                                             RegData value,
+                                             MakeError make_error) const noexcept;
     void validate_resolver_bindings() const;
     void warn_truncated_write(std::uint64_t address, RegData value, unsigned size) const noexcept;
     void complete_read_event(Resolution& r, WideRegData value, bool source_ok = true);
@@ -1112,7 +1137,19 @@ class RegisterMap {
     void set_identity_resolver(std::string_view name,
                                F f,
                                std::source_location at = std::source_location::current()) {
-        bind_identity_resolver(std::make_shared<const IdentityFn>(std::move(f)),
+        auto make_callback = [&]() -> IdentityFn {
+            if constexpr (std::is_null_pointer_v<F>) {
+                return {};
+            } else {
+                if constexpr (std::is_pointer_v<F>)
+                    if (!f)
+                        return {};
+                return [f = std::move(f)](const IdentityResolveRequest& request) mutable {
+                    return detail::checked_access_result<std::uint32_t>(std::invoke(f, request));
+                };
+            }
+        };
+        bind_identity_resolver(std::make_shared<const IdentityFn>(make_callback()),
                                detail::callback_description<F>(name, at));
     }
     template <class Tag, class V, class F>

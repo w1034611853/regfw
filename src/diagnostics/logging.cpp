@@ -82,6 +82,15 @@ void RegisterMap::log_error(std::string_view phase,
     }
 }
 
+void RegisterMap::log_index_failure(std::string_view name,
+                                    const detail::ScalarAccessFrame& frame,
+                                    const char* message,
+                                    std::string_view subject,
+                                    std::source_location at) const noexcept {
+    const detail::AccessFailure failure{ErrorKind::Access, message, subject, at};
+    log_error("access mapping/validation", name, frame, &failure);
+}
+
 RegMemTxResult RegisterMap::request_error(RegTransactionKind kind,
                                           std::uint64_t address,
                                           RegData value,

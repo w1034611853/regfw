@@ -183,6 +183,38 @@ void identity_failure() {
     late.finalize();
     CHECK(late.mmio_write(0, 9).success() && value_reg.ref() == 9);
 }
+struct GlobalIdentityIO : reg::Bundle {
+    REG_BUNDLE(GlobalIdentityIO);
+    REG_REPEAT_ENTITY(vf, IdentityWord, 2);
+    REG_LAYOUT([&] {
+        return reg::address_space("IO").map_repeat(
+            "VFS", 0, reg::repeat(2).stride(0x100), [&](auto i) {
+                return reg::view("VF", 0x100).map(vf[i]).identity(7);
+            });
+    });
+};
+template <class F>
+void global_identity_failure(F resolver) {
+    reg::RegisterBank<GlobalIdentityIO> bank(reg::space(0x200).name("GLOBAL_IDENTITY"));
+    auto& map = bank.map();
+    bank->vf[0].VALUE.ref() = 11;
+    bank->vf[1].VALUE.ref() = 22;
+    map.set_identity_resolver(nullptr);
+    CHECK(map.mmio_write(0, 33).result == reg::RegMemTxResult::DeviceError);
+    map.set_identity_resolver(resolver);
+    for (bool finished : {false, true}) {
+        if (finished)
+            bank.finish();
+        map.set_identity_rejection_policy(reg::IdentityRejectionPolicy::AccessError);
+        CHECK(map.try_mmio_read_sized(0, 4).result == reg::RegMemTxResult::AccessError);
+        CHECK(map.mmio_write(0, 33).result == reg::RegMemTxResult::AccessError);
+        map.set_identity_rejection_policy(reg::IdentityRejectionPolicy::Ignore);
+        const auto read = map.try_mmio_read_sized(0, 4);
+        CHECK(read.result == reg::RegMemTxResult::Ignored && read.value == 0xdeadbeef);
+        CHECK(map.mmio_write(0, 33).result == reg::RegMemTxResult::Ignored);
+        CHECK(bank->vf[0].VALUE.ref() == 11 && bank->vf[1].VALUE.ref() == 22);
+    }
+}
 void failed_request_log() {
     auto* logger = hlog_register_logger("resolver_safety", "errors", HLOG_LEVEL_ERROR);
     CHECK(logger);
@@ -206,6 +238,12 @@ void failed_request_log() {
 int main() try {
     index_binding();
     identity_failure();
+    global_identity_failure([](const auto&) {
+        return 1ULL << 32;
+    });
+    global_identity_failure([](const auto&) {
+        return -1;
+    });
     failed_request_log();
     std::cout << "PASS: strict/deferred bindings, identity rejection/error policies, unchanged "
                  "storage, QEMU faults and request diagnostics\n";

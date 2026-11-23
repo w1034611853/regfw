@@ -50,29 +50,52 @@ RegisterMap::AliasEntry RegisterMap::resolve_static(std::uint64_t address, unsig
     return hole;
 }
 
-REGFW_DETAIL_ALWAYS_INLINE inline detail::AccessFailure
+REGFW_DETAIL_ALWAYS_INLINE inline RegisterMap::IdentityCheck
 RegisterMap::resolve_identity(const detail::IdentityWindow& window,
                               const IdentityResolveRequest& request,
-                              AccessIdentity& identity,
-                              std::source_location at) const {
+                              AccessIdentity& identity) const {
     const auto* fn = window.resolver ? window.resolver->callback.get() : identity_resolver_.get();
     if (!fn)
-        return {ErrorKind::Configuration, "identity resolver is not configured", {}, at};
-    detail::CheckedIndex result;
+        return IdentityCheck::Unbound;
+    const auto result = (*fn)(request);
+    if (result.value >= window.count)
+        return result.error ? IdentityCheck::InvalidId : IdentityCheck::OutOfRange;
+    identity = {window.domain,
+                request.request_id,
+                static_cast<std::uint32_t>(result.value),
+                window.mode,
+                request.source,
+                window.trace_labels};
+    return IdentityCheck::Ok;
+}
+
+detail::AccessFailure RegisterMap::identity_failure(IdentityCheck status, std::source_location at) {
+    switch (status) {
+        case IdentityCheck::Unbound:
+            return {ErrorKind::Configuration, "identity resolver is not configured", {}, at};
+        case IdentityCheck::InvalidId:
+            return {
+                ErrorKind::Identity, "identity resolver returned an invalid unsigned ID", {}, at};
+        case IdentityCheck::OutOfRange:
+            return {ErrorKind::Identity, "resolved identity out of range", {}, at};
+        case IdentityCheck::Ok:
+            return {};
+    }
+    return {};
+}
+
+detail::AccessFailure RegisterMap::resolve_identity_checked(const detail::IdentityWindow& window,
+                                                            const IdentityResolveRequest& request,
+                                                            AccessIdentity& identity,
+                                                            std::source_location at) const {
+    IdentityCheck status{};
     if (auto error = detail::invoke_access_user(
             [&] {
-                result = (*fn)(request);
+                status = resolve_identity(window, request, identity);
             },
             "identity resolver failed"))
         return error;
-    if (result.error)
-        return {ErrorKind::Identity, "identity resolver returned an invalid unsigned ID", {}, at};
-    const auto id = static_cast<std::uint32_t>(result.value);
-    if (id >= window.count)
-        return {ErrorKind::Identity, "resolved identity out of range", {}, at};
-    identity = {
-        window.domain, request.request_id, id, window.mode, request.source, window.trace_labels};
-    return {};
+    return identity_failure(status, at);
 }
 
 std::tuple<std::uint64_t, AccessRoute, std::optional<AccessIdentity>>
@@ -88,16 +111,16 @@ RegisterMap::resolve_address_with_identity(std::uint64_t address, unsigned size)
         const auto& w = identities_[*source.identity_index];
         if (auto match = w.match(address, size, source.instance)) {
             AccessIdentity identity;
-            if (auto error = resolve_identity(w,
-                                              {w.domain,
-                                               match->first,
-                                               address,
-                                               source.target,
-                                               match->second,
-                                               static_cast<std::uint8_t>(size),
-                                               source.route,
-                                               IdentityAddressSource::Bus},
-                                              identity)) {
+            if (auto error = resolve_identity_checked(w,
+                                                      {w.domain,
+                                                       match->first,
+                                                       address,
+                                                       source.target,
+                                                       match->second,
+                                                       static_cast<std::uint8_t>(size),
+                                                       source.route,
+                                                       IdentityAddressSource::Bus},
+                                                      identity)) {
                 if (error.cause && !error.message)
                     std::rethrow_exception(error.cause); // public throwing query
                 throw Error(error.message, error.kind, error.location, error.cause);
@@ -157,16 +180,16 @@ detail::AccessFailure RegisterMap::resolve_plan(std::uint64_t address,
         const auto& w = identities_[*source.identity_index];
         if (auto match = w.match(address, size, instance)) {
             AccessIdentity resolved;
-            if (auto error = resolve_identity(w,
-                                              {w.domain,
-                                               match->first,
-                                               address,
-                                               alias.target,
-                                               match->second,
-                                               static_cast<std::uint8_t>(size),
-                                               alias.route,
-                                               IdentityAddressSource::Bus},
-                                              resolved))
+            if (auto error = resolve_identity_checked(w,
+                                                      {w.domain,
+                                                       match->first,
+                                                       address,
+                                                       alias.target,
+                                                       match->second,
+                                                       static_cast<std::uint8_t>(size),
+                                                       alias.route,
+                                                       IdentityAddressSource::Bus},
+                                                      resolved))
                 return error;
             identity = resolved;
             if (w.mode == IdentityRemapMode::RedirectBank) {
@@ -831,10 +854,21 @@ RegisterMap::fast_scalar(std::uint64_t address,
     });
 }
 
+template <class MakeError>
+REGFW_DETAIL_NOINLINE RegMmioReadResult
+RegisterMap::scalar_request_failure(RegTransactionKind kind,
+                                    std::uint64_t address,
+                                    RegData value,
+                                    MakeError make_error) const noexcept {
+    return {kind == RegTransactionKind::Write ? 0 : INVALID_READ_VALUE & 0xffffffff,
+            request_error(kind, address, value, 4, make_error())};
+}
+
 template <bool Writing, class Selection>
 RegMmioReadResult
 RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection& source) {
     constexpr bool writing = Writing;
+    constexpr auto kind = Writing ? RegTransactionKind::Write : RegTransactionKind::Read;
     const auto& origin = *source.context;
     const auto source_address = source.canonical(address);
     auto target = source;
@@ -849,22 +883,31 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
         const auto request = origin.request_id;
         const auto inner = origin.mount_inner + (address - origin.mount->base);
         AccessIdentity resolved;
-        if (auto error = resolve_identity(w,
-                                          {w.domain,
-                                           request,
-                                           address,
-                                           source_address,
-                                           inner,
-                                           4,
-                                           route,
-                                           IdentityAddressSource::Bus},
-                                          resolved))
-            return {Writing ? 0 : INVALID_READ_VALUE & 0xffffffff,
-                    request_error(Writing ? RegTransactionKind::Write : RegTransactionKind::Read,
-                                  address,
-                                  value,
-                                  4,
-                                  error)};
+        IdentityCheck status;
+        try {
+            status = resolve_identity(w,
+                                      {w.domain,
+                                       request,
+                                       address,
+                                       source_address,
+                                       inner,
+                                       4,
+                                       route,
+                                       IdentityAddressSource::Bus},
+                                      resolved);
+        } catch (const Error& error) {
+            return scalar_request_failure(kind, address, value, [&] {
+                return detail::callback_failure(error);
+            });
+        } catch (...) {
+            return scalar_request_failure(kind, address, value, [] {
+                return detail::callback_failure("identity resolver failed");
+            });
+        }
+        if (status != IdentityCheck::Ok) [[unlikely]]
+            return scalar_request_failure(kind, address, value, [&] {
+                return identity_failure(status, std::source_location::current());
+            });
         identity = resolved;
         if (w.mode == IdentityRemapMode::RedirectBank) {
             const auto id = identity->resolved_id;
@@ -958,31 +1001,47 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
                                      : RegMemTxResult::AccessError};
     }
     if (plan) {
-        auto failed = [&](const detail::AccessFailure& error) {
+        auto failed = [&](RegMemTxResult result,
+                          const char* message = nullptr,
+                          std::string_view subject = {},
+                          std::source_location at = std::source_location::current()) {
             if (log_enabled(HLOG_LEVEL_ERROR)) {
                 if (deferred)
                     populate();
-                log_error("access mapping/validation", n.name, frame, &error);
+                if (message)
+                    log_index_failure(n.name, frame, message, subject, at);
+                else
+                    log_error("access mapping/validation", n.name, frame);
             }
-            return RegMmioReadResult{writing ? 0 : invalid, error.result};
+            return RegMmioReadResult{writing ? 0 : invalid, result};
         };
-        if (!resolver)
-            return failed(
-                {ErrorKind::Device, "access resolver is not bound: ", plan->resolver->name});
-        if (auto error = detail::invoke_index_resolver(
-                [&] {
-                    if (resolver->coordinate_only()) {
-                        const auto id = identity ? identity->resolved_id
-                                                 : instance.value_or(bound.instance.value_or(0));
-                        return resolver->from_coordinates(id, logical);
-                    }
-                    return resolver->from_frame(frame);
-                },
-                mapped.mapped))
-            return failed(error);
+        if (!resolver) [[unlikely]]
+            return failed(RegMemTxResult::DeviceError,
+                          "access resolver is not bound: ",
+                          plan->resolver->name);
+        detail::CheckedIndex index;
+        try {
+            if (resolver->coordinate_only()) {
+                const auto id = identity ? identity->resolved_id
+                                         : instance.value_or(bound.instance.value_or(0));
+                index = resolver->from_coordinates(id, logical);
+            } else {
+                index = resolver->from_frame(frame);
+            }
+        } catch (const Error& error) {
+            return failed(error.result);
+        } catch (...) {
+            return failed(RegMemTxResult::DeviceError);
+        }
+        mapped.mapped = index.value;
         mapped.has_mapped = true;
-        if (mapped.mapped >= plan->extent)
-            return failed({ErrorKind::Access, "mapped element out of range"});
+        if (index.value >= plan->extent) [[unlikely]] {
+            if (index.error) {
+                mapped.has_mapped = false;
+                return failed(detail::access_status(index.error->kind), index.error->message);
+            }
+            return failed(RegMemTxResult::AccessError, "mapped element out of range");
+        }
         mapped.index_valid = true;
         if (mapped.mapped != logical)
             linear = linear - logical * plan->coefficient +
@@ -1017,20 +1076,29 @@ RegisterMap::mapped_scalar(std::uint64_t address, RegData value, const Selection
 template <bool Writing>
 REGFW_DETAIL_ALWAYS_INLINE inline std::optional<RegMmioReadResult> RegisterMap::try_fast_mmio(
     std::uint64_t address, RegData value, unsigned size, const AliasEntry*& selected) {
-    if (!finalized_ || size != 4 || (address & 3))
+    if (!finalized_ || size != 4)
         return {};
 
+    constexpr auto kind = Writing ? RegTransactionKind::Write : RegTransactionKind::Read;
+    constexpr auto invalid = Writing ? 0 : INVALID_READ_VALUE & 0xffffffff;
+    if (address & 3) [[unlikely]] {
+        if (!logger_)
+            return RegMmioReadResult{invalid, RegMemTxResult::Unsupported};
+        return scalar_request_failure(kind, address, value, [] {
+            return detail::AccessFailure{ErrorKind::Unsupported, "invalid/unaligned access"};
+        });
+    }
+
     detail::FormulaDecoder::PreparedHit hit;
-    if (!formula_->find_prepared(address, hit))
-        return RegMmioReadResult{
-            Writing ? 0 : INVALID_READ_VALUE & 0xffffffff,
-            request_error(
-                Writing ? RegTransactionKind::Write : RegTransactionKind::Read,
-                address,
-                value,
-                size,
-                {ErrorKind::Decode,
-                 address < size_ ? "unmapped entity view address" : "address outside map"})};
+    if (!formula_->find_prepared(address, hit)) [[unlikely]] {
+        if (!logger_)
+            return RegMmioReadResult{invalid, RegMemTxResult::DecodeError};
+        return scalar_request_failure(kind, address, value, [&] {
+            return detail::AccessFailure{ErrorKind::Decode,
+                                         address < size_ ? "unmapped entity view address"
+                                                         : "address outside map"};
+        });
+    }
     const auto& context = *hit.context;
     using Path = detail::FormulaDecoder::Path;
     const auto path = Writing ? context.write_path : context.read_path;
@@ -1061,6 +1129,13 @@ RegisterMap::try_mmio_write_sized(std::uint64_t address, RegData value, unsigned
     const AliasEntry* selected = nullptr;
     if (auto fast = try_fast_mmio<true>(address, value, size, selected))
         return {fast->result};
+    return write_mmio_fallback(address, value, size, selected);
+}
+
+// Generic writes construct full failure and access contexts. Keep those
+// temporaries out of the entry frame used by scalar and mapped writes.
+REGFW_DETAIL_NOINLINE RegMmioWriteResult RegisterMap::write_mmio_fallback(
+    std::uint64_t address, RegData value, unsigned size, const AliasEntry* selected) {
     if (auto error = resolve(address, size, RegTransactionKind::Write, value, selected))
         return {request_error(RegTransactionKind::Write, address, value, size, error)};
     auto& r = access_scratch_->resolution;

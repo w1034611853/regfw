@@ -133,40 +133,49 @@ struct AccessFailure {
     }
 };
 
+inline AccessFailure callback_failure(const Error& e) {
+    AccessFailure error;
+    error.kind = e.kind;
+    error.result = e.result;
+    error.cause = std::current_exception();
+    return error;
+}
+
+inline AccessFailure callback_failure(const char* message) {
+    AccessFailure error{ErrorKind::Device, message};
+    error.cause = std::current_exception();
+    return error;
+}
+
 template <class F>
 AccessFailure invoke_access_user(F&& call, const char* foreign_message = nullptr) {
     try {
         std::forward<F>(call)();
         return {};
     } catch (const Error& e) {
-        AccessFailure error;
-        error.kind = e.kind;
-        error.result = e.result;
-        error.cause = std::current_exception();
-        return error;
+        return callback_failure(e);
     } catch (...) {
-        AccessFailure error{ErrorKind::Device, foreign_message};
-        error.cause = std::current_exception();
-        return error;
+        return callback_failure(foreign_message);
     }
 }
 
+struct IndexFailure {
+    ErrorKind kind;
+    const char* message;
+};
+
 // The callback thunks return the value and a static reason in two words.
 struct CheckedIndex {
-    union {
-        RegData value{};
-        ErrorKind kind;
-    };
-    const char* error{};
-    CheckedIndex() noexcept = default;
-    template <class V>
-        requires std::is_convertible_v<V, RegData>
-    CheckedIndex(V&& value) noexcept(std::is_nothrow_convertible_v<V, RegData>)
-        : value(std::forward<V>(value)) {
-    }
-    CheckedIndex(ErrorKind kind, const char* error) noexcept : kind(kind), error(error) {
+    RegData value{};
+    const IndexFailure* error{};
+
+    static constexpr CheckedIndex failure(const IndexFailure& reason) noexcept {
+        // An invalid result also fails any identity or physical index bound.
+        return {UINT64_MAX, &reason};
     }
 };
+static_assert(sizeof(CheckedIndex) == 16);
+static_assert(std::is_trivially_copyable_v<CheckedIndex>);
 } // namespace detail
 using RegCallbackError = Error;
 using IdentityResolveError = Error;

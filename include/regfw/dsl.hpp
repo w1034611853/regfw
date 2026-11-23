@@ -180,7 +180,7 @@ class Groups {
                         std::invoke(f, info));
                 else if constexpr (std::is_invocable_v<F&, std::uint32_t, decltype(v)>) {
                     if (!info.resolved_identity)
-                        return {ErrorKind::Device, "no resolved identity"};
+                        return detail::CheckedIndex::failure(detail::missing_resolved_identity);
                     return detail::checked_access_result<typename Output::Value>(
                         std::invoke(f, *info.resolved_identity, v));
                 } else
